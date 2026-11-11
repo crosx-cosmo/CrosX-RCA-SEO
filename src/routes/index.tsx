@@ -15,15 +15,13 @@ import {
 } from "lucide-react";
 
 import { CROSX_LOGO_URL } from "@/lib/brand";
-import {
-  buildCanonicalLinks,
-  buildHomeStructuredData,
-  buildPageMeta,
-} from "@/lib/seo";
+import { buildCanonicalLinks, buildHomeStructuredData, buildPageMeta } from "@/lib/seo";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { BrowserExtensionPanel } from "@/components/analyzer/BrowserExtensionPanel";
 import { ExportBar } from "@/components/analyzer/ExportBar";
+import { RedirectMonitorPanel } from "@/components/analyzer/RedirectMonitorPanel";
 import { ReportView } from "@/components/analyzer/ReportView";
 import { StatusBadge } from "@/components/analyzer/StatusBadge";
 import { EmptyState, ErrorState, LoadingState } from "@/components/analyzer/States";
@@ -35,6 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { analysisKey, type ShareIdMap } from "@/lib/analysis-store";
+import { USER_AGENT_PRESETS } from "@/lib/redirect-analysis";
 import { activeBackend, analyzeUrls, demoAnalysis } from "@/lib/redirect-service";
 import type { RedirectAnalysis, UserAgentPreset } from "@/lib/redirect-types";
 import { AdsterraNativeBanner } from "@/components/AdsterraNativeBanner";
@@ -53,7 +52,7 @@ const SEO_FAQS = [
   },
   {
     q: "How does Redirect Chain Analyzer detect JavaScript and meta refresh redirects?",
-    a: "Unlike basic HTTP header checkers that stop at status 200, our server-side trace engine inspects HTML responses for <meta http-equiv=\"refresh\"> tags, canonical headers, and inline JavaScript navigation patterns (window.location, location.href, location.replace, location.assign), escalating to a sandboxed headless browser when cloaked client-side hops are detected.",
+    a: 'Unlike basic HTTP header checkers that stop at status 200, our server-side trace engine inspects HTML responses for <meta http-equiv="refresh"> tags, canonical headers, and inline JavaScript navigation patterns (window.location, location.href, location.replace, location.assign), escalating to a sandboxed headless browser when cloaked client-side hops are detected.',
   },
   {
     q: "Why should I test URLs with different User-Agent profiles (Googlebot vs Mobile vs Desktop)?",
@@ -329,7 +328,16 @@ function AnalyzerPage() {
           </section>
         ) : null}
 
-        {mutation.isPending ? <LoadingState /> : null}
+        {mutation.isPending ? (
+          <LoadingState
+            urls={mutation.variables?.urls}
+            userAgentLabel={
+              mutation.variables?.userAgent
+                ? USER_AGENT_PRESETS[mutation.variables.userAgent]?.label
+                : USER_AGENT_PRESETS["desktop-chrome"].label
+            }
+          />
+        ) : null}
 
         {!mutation.isPending && mutation.isError ? (
           <ErrorState message={(mutation.error as Error)?.message ?? "Unknown error"} />
@@ -357,11 +365,14 @@ function AnalyzerPage() {
             ))
           : null}
 
+        {/* Scheduled Redirect Drift & Uptime Monitor */}
+        <RedirectMonitorPanel activeResults={results} />
+
+        {/* One-Click Browser Bookmarklet & Chrome Extension Companion */}
+        <BrowserExtensionPanel />
+
         {/* Crawlable Technical SEO & Affiliate Forensics Reference */}
-        <section
-          aria-labelledby="seo-guide-heading"
-          className="panel space-y-5 p-5 sm:p-7"
-        >
+        <section aria-labelledby="seo-guide-heading" className="panel space-y-5 p-5 sm:p-7">
           <div className="space-y-1.5">
             <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.09em] text-brand">
               <BookOpen className="size-3.5" />
@@ -374,9 +385,10 @@ function AnalyzerPage() {
               How server-side redirect chain auditing protects rankings and attribution
             </h2>
             <p className="text-xs leading-relaxed text-muted-foreground sm:text-sm">
-              Search engine crawlers and performance marketing funnels depend on clean, deterministic
-              HTTP forwarding. Inspecting every hop server-side reveals hidden status codes, header
-              policies, and parameter mutations before they degrade organic visibility or paid ROAS.
+              Search engine crawlers and performance marketing funnels depend on clean,
+              deterministic HTTP forwarding. Inspecting every hop server-side reveals hidden status
+              codes, header policies, and parameter mutations before they degrade organic visibility
+              or paid ROAS.
             </p>
           </div>
 
@@ -410,9 +422,10 @@ function AnalyzerPage() {
               </h3>
               <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
                 Comparing Googlebot Smartphone against Desktop and Mobile User-Agents uncovers
-                conditional routing, while HSTS (<code className="font-mono text-[11px]">Strict-Transport-Security</code>)
-                and <code className="font-mono text-[11px]">X-Robots-Tag</code> checks prevent
-                protocol downgrades and silent de-indexing.
+                conditional routing, while HSTS (
+                <code className="font-mono text-[11px]">Strict-Transport-Security</code>) and{" "}
+                <code className="font-mono text-[11px]">X-Robots-Tag</code> checks prevent protocol
+                downgrades and silent de-indexing.
               </p>
             </article>
           </div>
@@ -436,14 +449,39 @@ function AnalyzerPage() {
           </div>
         </section>
 
-        <footer className="border-t border-hairline pt-4 text-center font-mono text-[11px] text-muted-foreground">
-          Requests run server-side behind SSRF protection, with a 20-hop limit, a 15 s per-hop
-          timeout and a 55 s overall budget. Hops that cannot be safely followed are reported with
-          the exact reason.
+        <footer className="space-y-2 border-t border-hairline pt-4 text-center font-mono text-[11px] leading-relaxed text-muted-foreground">
+          <p>
+            Requests run server-side behind SSRF, WAF &amp; DDoS burst protection with multi-user
+            concurrency throttling, a 20-hop limit, a 15 s per-hop timeout and a 55 s overall
+            budget.
+          </p>
+          <nav
+            aria-label="Footer navigation"
+            className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px]"
+          >
+            <Link to="/" className="hover:text-foreground">
+              Redirect Chain Analyzer
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/links" className="hover:text-foreground">
+              Short Links &amp; UTM Builder
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/api-docs" className="hover:text-foreground">
+              Chain Tracer JSON API
+            </Link>
+            <span aria-hidden="true">·</span>
+            <a href="/sitemap.xml" className="hover:text-foreground">
+              Sitemap
+            </a>
+            <span aria-hidden="true">·</span>
+            <a href="/llms.txt" className="hover:text-foreground">
+              LLMs.txt
+            </a>
+          </nav>
         </footer>
         <AdsterraNativeBanner />
       </main>
     </div>
   );
 }
-

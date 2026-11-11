@@ -1,7 +1,7 @@
 {
-  "name": "Redirect Chain Analyzer",
+  "name": "Redirect Chain Analyzer — CROSX",
   "short_name": "Redirect Analyzer",
-  "description": "Trace any URL end to end: HTTP redirects, meta refresh, JavaScript navigation, cloaked affiliate hops, loops and tracking parameter loss.",
+  "description": "Trace any URL end to end: HTTP 301/302/307/308 redirects, meta refresh, obfuscated JavaScript navigation, cloaked affiliate hops, loops and tracking parameter loss.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
@@ -10,7 +10,7 @@
   "orientation": "portrait",
   "theme_color": "#131313",
   "background_color": "#131313",
-  "categories": ["utilities", "developer", "productivity"],
+  "categories": ["utilities", "developer", "productivity", "security"],
   "lang": "en",
   "dir": "ltr",
   "icons": [
@@ -25,6 +25,20 @@
       "short_name": "Analyze",
       "description": "Open the analyzer and trace a new redirect chain",
       "url": "/?source=shortcut",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Short Links Manager",
+      "short_name": "Short Links",
+      "description": "Create and manage transparent 302 short links with QR codes and UTM builder",
+      "url": "/links",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Chain Tracer API",
+      "short_name": "API Docs",
+      "description": "Developer JSON API documentation and interactive playground",
+      "url": "/api-docs",
       "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
     }
   ]

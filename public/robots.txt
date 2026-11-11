@@ -4,6 +4,7 @@ Allow: /links
 Allow: /api-docs
 Allow: /llms.txt
 Allow: /humans.txt
+Allow: /sitemap.xml
 Disallow: /api/
 Disallow: /s/
 Disallow: /r/
@@ -13,11 +14,43 @@ Allow: /
 Allow: /links
 Allow: /api-docs
 Allow: /llms.txt
+Allow: /sitemap.xml
 Disallow: /api/
 Disallow: /s/
 Disallow: /r/
 
+User-agent: Google-Extended
+Allow: /
+Allow: /links
+Allow: /api-docs
+Allow: /llms.txt
+
 User-agent: Bingbot
+Allow: /
+Allow: /links
+Allow: /api-docs
+Allow: /llms.txt
+Allow: /sitemap.xml
+Disallow: /api/
+Disallow: /s/
+Disallow: /r/
+
+User-agent: Applebot
+Allow: /
+Allow: /links
+Allow: /api-docs
+Allow: /llms.txt
+Disallow: /api/
+Disallow: /s/
+Disallow: /r/
+
+User-agent: Applebot-Extended
+Allow: /
+Allow: /links
+Allow: /api-docs
+Allow: /llms.txt
+
+User-agent: DuckDuckBot
 Allow: /
 Allow: /links
 Allow: /api-docs
@@ -58,6 +91,20 @@ Allow: /llms.txt
 Disallow: /api/
 Disallow: /s/
 
+User-agent: Twitterbot
+Allow: /
+Allow: /links
+Allow: /api-docs
+
+User-agent: LinkedInBot
+Allow: /
+Allow: /links
+Allow: /api-docs
+
+User-agent: facebookexternalhit
+Allow: /
+Allow: /links
+Allow: /api-docs
+
 Host: https://rca.crosx.in
 Sitemap: https://rca.crosx.in/sitemap.xml
-

@@ -9,11 +9,13 @@ import {
   Check,
   Download,
   GitBranch,
+  HeartPulse,
   Link2,
   Loader2,
   Pencil,
   Plus,
   Search,
+  Tag,
   Trash2,
   Upload,
   X,
@@ -22,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AdsterraNativeBanner } from "@/components/AdsterraNativeBanner";
+import { BrowserExtensionPanel } from "@/components/analyzer/BrowserExtensionPanel";
 import { CopyButton } from "@/components/analyzer/CopyButton";
 import { LinkAnalyticsPanel } from "@/components/links/LinkAnalyticsPanel";
 import { RuleBuilder } from "@/components/links/RuleBuilder";
@@ -32,21 +35,26 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CROSX_LOGO_URL } from "@/lib/brand";
 import type { LinkRule } from "@/lib/link-rules";
+import { applyUtmParameters } from "@/lib/redirect-rules-codegen";
+import { scanRedirectThreats } from "@/lib/threat-scanner";
 import {
   buildCanonicalLinks,
   buildLinksStructuredData,
   buildPageMeta,
+  LINKS_KEYWORDS,
   SITE_HOST,
   SITE_URL,
 } from "@/lib/seo";
 import {
+  checkShortLinksHealth,
   createShortLink,
   deleteShortLink,
+  type DestinationHealthResult,
   listShortLinks,
   setShortLinkEnabled,
   setShortLinkExpiry,
-  updateShortLinkDestination,
   type ShortLink,
+  updateShortLinkDestination,
 } from "@/lib/shortlinks.functions";
 
 const TITLE = "Short Links — Redirect Chain Analyzer";
@@ -59,6 +67,7 @@ export const Route = createFileRoute("/links")({
       title: TITLE,
       description: DESCRIPTION,
       path: "/links",
+      keywords: LINKS_KEYWORDS,
       twitterCard: "summary_large_image",
     }),
     links: buildCanonicalLinks("/links"),
@@ -133,6 +142,12 @@ function LinksPage() {
   const qc = useQueryClient();
   const [destination, setDestination] = useState("");
   const [slug, setSlug] = useState("");
+  const [showUtmBuilder, setShowUtmBuilder] = useState(false);
+  const [utmSource, setUtmSource] = useState("");
+  const [utmMedium, setUtmMedium] = useState("");
+  const [utmCampaign, setUtmCampaign] = useState("");
+  const [utmTerm, setUtmTerm] = useState("");
+  const [utmContent, setUtmContent] = useState("");
   const [search, setSearch] = useState("");
   const origin = SITE_URL;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -143,6 +158,8 @@ function LinksPage() {
   const [rulesId, setRulesId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [importingCsv, setImportingCsv] = useState(false);
+  const [checkingHealth, setCheckingHealth] = useState(false);
+  const [healthMap, setHealthMap] = useState<Record<string, DestinationHealthResult>>({});
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   const list = useServerFn(listShortLinks);
@@ -151,6 +168,72 @@ function LinksPage() {
   const remove = useServerFn(deleteShortLink);
   const updateDest = useServerFn(updateShortLinkDestination);
   const setExpiry = useServerFn(setShortLinkExpiry);
+  const checkHealthFn = useServerFn(checkShortLinksHealth);
+
+  const effectiveDestination = useMemo(() => {
+    if (!destination.trim()) return "";
+    const hasUtm = [utmSource, utmMedium, utmCampaign, utmTerm, utmContent].some((v) => v.trim());
+    if (!hasUtm) return destination.trim();
+    return applyUtmParameters(destination.trim(), {
+      source: utmSource,
+      medium: utmMedium,
+      campaign: utmCampaign,
+      term: utmTerm,
+      content: utmContent,
+    });
+  }, [destination, utmSource, utmMedium, utmCampaign, utmTerm, utmContent]);
+
+  const destinationThreatScan = useMemo(() => {
+    const raw = effectiveDestination || destination.trim();
+    if (!raw || !/^https?:\/\/\S+/i.test(raw)) return null;
+    try {
+      const parsed = new URL(raw);
+      return scanRedirectThreats({
+        startUrl: parsed.toString(),
+        finalUrl: parsed.toString(),
+        finalStatus: 200,
+        totalHops: 1,
+        totalRedirects: 0,
+        totalResponseTimeMs: 0,
+        redirectLoop: false,
+        hops: [
+          {
+            index: 0,
+            url: parsed.toString(),
+            status: 200,
+            statusText: "OK",
+            location: null,
+            resolvedLocation: null,
+            responseTimeMs: 0,
+            headers: {
+              "strict-transport-security": parsed.protocol === "https:" ? "max-age=31536000" : "",
+            },
+            protocol: parsed.protocol === "https:" ? "https" : "http",
+            params: Object.fromEntries(parsed.searchParams.entries()),
+            redirectType: "200 Final",
+            mechanism: "final-response",
+          },
+        ],
+        seo: {
+          finalStatus: 200,
+          https: parsed.protocol === "https:",
+          canonical: null,
+          metaRobots: null,
+          chainLength: 0,
+        },
+        issues: [],
+        tracking: {
+          lostTrackingParams: [],
+          keptTrackingParams: [],
+          diffs: [],
+        },
+        source: "live",
+        analyzedAt: new Date().toISOString(),
+      });
+    } catch {
+      return null;
+    }
+  }, [destination, effectiveDestination]);
 
   const links = useQuery({
     queryKey: ["short-links", owner],
@@ -159,6 +242,30 @@ function LinksPage() {
     retry: false,
   });
   const refresh = () => qc.invalidateQueries({ queryKey: ["short-links"] });
+
+  async function handleCheckHealth() {
+    if (!owner || filtered.length === 0) return;
+    setCheckingHealth(true);
+    try {
+      const items = filtered.slice(0, 20).map((l) => ({ id: l.id, url: l.destination }));
+      const results = await checkHealthFn({ data: { owner, items } });
+      const next: Record<string, DestinationHealthResult> = { ...healthMap };
+      for (const r of results) {
+        next[r.id] = r;
+      }
+      setHealthMap(next);
+      const brokenCount = results.filter((r) => !r.ok).length;
+      if (brokenCount === 0) {
+        toast.success(`All ${results.length} destination URL(s) responded healthy`);
+      } else {
+        toast.warning(`${brokenCount} of ${results.length} destination URL(s) reported issues`);
+      }
+    } catch (err) {
+      toast.error((err as Error).message || "Destination health check failed");
+    } finally {
+      setCheckingHealth(false);
+    }
+  }
 
   async function handleImportCsv(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -181,7 +288,11 @@ function LinksPage() {
           continue;
         }
         const isFirstUrl = /^https?:\/\//i.test(first);
-        const dest = isFirstUrl ? first : parts[2] && /^https?:\/\//i.test(parts[2]) ? parts[2] : second;
+        const dest = isFirstUrl
+          ? first
+          : parts[2] && /^https?:\/\//i.test(parts[2])
+            ? parts[2]
+            : second;
         const customSlug = isFirstUrl ? second : first;
         if (!dest || !/^https?:\/\//i.test(dest)) continue;
         try {
@@ -215,7 +326,11 @@ function LinksPage() {
   const createMut = useMutation({
     mutationFn: () =>
       create({
-        data: { destination: destination.trim(), slug: slug.trim() || undefined, owner: owner! },
+        data: {
+          destination: effectiveDestination || destination.trim(),
+          slug: slug.trim() || undefined,
+          owner: owner!,
+        },
       }),
     onSuccess: (row) => {
       const url = `${origin}/s/${row.slug}`;
@@ -223,27 +338,29 @@ function LinksPage() {
       void navigator.clipboard?.writeText(url).catch(() => {});
       setDestination("");
       setSlug("");
+      setUtmSource("");
+      setUtmMedium("");
+      setUtmCampaign("");
+      setUtmTerm("");
+      setUtmContent("");
       refresh();
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const all = links.data ?? [];
+  const all = useMemo(() => links.data ?? [], [links.data]);
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return all;
     return all.filter((l) => `${l.slug} ${l.destination}`.toLowerCase().includes(q));
   }, [all, search]);
   const totalClicks = useMemo(() => all.reduce((sum, l) => sum + l.clicks, 0), [all]);
-  const activeCount = useMemo(
-    () => all.filter((l) => l.enabled && !isExpired(l)).length,
-    [all],
-  );
+  const activeCount = useMemo(() => all.filter((l) => l.enabled && !isExpired(l)).length, [all]);
 
   return (
     <div className="bg-hero min-h-screen">
       <header className="app-safe-top sticky top-0 z-30 border-b border-hairline bg-background/70 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-5xl items-center gap-3 px-4 py-3 sm:px-6">
+        <div className="mx-auto flex max-w-5xl items-center gap-3 px-4 py-3 sm:gap-4 sm:px-6">
           <Link to="/" aria-label="CROSX home" className="flex shrink-0 items-center">
             <img
               src={CROSX_LOGO_URL}
@@ -257,16 +374,23 @@ function LinksPage() {
             />
           </Link>
           <span aria-hidden="true" className="h-6 w-px shrink-0 bg-hairline" />
-          <h1 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-foreground">
-            Short Links
-          </h1>
-          <Button asChild variant="subtle" size="sm">
-            <Link to="/">
-              <ArrowLeft className="size-3.5" />
-              <span className="hidden sm:inline">Analyzer</span>
-            </Link>
-          </Button>
-          <ThemeToggle />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-[14.5px] font-semibold leading-tight tracking-tight text-foreground sm:text-[15.5px]">
+              Short Links
+            </h1>
+            <p className="hidden truncate text-[11px] leading-tight text-muted-foreground sm:block">
+              Transparent 302 shortener with QR codes, smart rules and click analytics
+            </p>
+          </div>
+          <nav aria-label="Primary navigation" className="flex shrink-0 items-center gap-2">
+            <Button asChild variant="subtle" size="sm">
+              <Link to="/">
+                <ArrowLeft className="size-3.5" />
+                <span className="hidden sm:inline">Analyzer</span>
+              </Link>
+            </Button>
+            <ThemeToggle />
+          </nav>
         </div>
       </header>
 
@@ -278,8 +402,20 @@ function LinksPage() {
             if (owner && destination.trim()) createMut.mutate();
           }}
         >
-          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Link2 className="size-4 text-brand" /> Create a short link
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Link2 className="size-4 text-brand" /> Create a short link
+            </div>
+            <Button
+              type="button"
+              variant={showUtmBuilder ? "subtle" : "ghost"}
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => setShowUtmBuilder((v) => !v)}
+            >
+              <Tag className="size-3.5 text-brand" />
+              UTM Campaign Builder
+            </Button>
           </div>
           <Input
             value={destination}
@@ -287,23 +423,99 @@ function LinksPage() {
             placeholder="https://example.com/landing?utm_source=newsletter"
             inputMode="url"
             spellCheck={false}
-            className="h-12 rounded-xl border-hairline bg-surface-muted font-mono text-sm"
+            className="h-11 rounded-xl border-hairline bg-surface-muted font-mono text-sm"
           />
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <div className="flex flex-1 items-center rounded-xl border border-hairline bg-surface-muted pl-3 font-mono text-sm text-muted-foreground">
+
+          {destinationThreatScan && destinationThreatScan.findings.length > 0 ? (
+            <div className="rounded-xl border border-warning/35 bg-warning/10 px-3 py-2 text-xs text-foreground">
+              <span className="font-semibold text-warning">
+                Threat Scanner Notice ({destinationThreatScan.riskLabel}):{" "}
+              </span>
+              {destinationThreatScan.findings.map((f) => f.title).join(" · ")}
+            </div>
+          ) : null}
+
+          {showUtmBuilder && (
+            <div className="space-y-2.5 rounded-xl border border-hairline bg-surface-muted/60 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  UTM Parameters (automatically appended to destination)
+                </p>
+                {[utmSource, utmMedium, utmCampaign, utmTerm, utmContent].some((v) => v.trim()) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUtmSource("");
+                      setUtmMedium("");
+                      setUtmCampaign("");
+                      setUtmTerm("");
+                      setUtmContent("");
+                    }}
+                    className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    Clear UTM
+                  </button>
+                )}
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <Input
+                  value={utmSource}
+                  onChange={(e) => setUtmSource(e.target.value)}
+                  placeholder="utm_source (e.g. newsletter)"
+                  className="h-9 border-hairline bg-background font-mono text-xs"
+                />
+                <Input
+                  value={utmMedium}
+                  onChange={(e) => setUtmMedium(e.target.value)}
+                  placeholder="utm_medium (e.g. email)"
+                  className="h-9 border-hairline bg-background font-mono text-xs"
+                />
+                <Input
+                  value={utmCampaign}
+                  onChange={(e) => setUtmCampaign(e.target.value)}
+                  placeholder="utm_campaign (e.g. spring_launch)"
+                  className="h-9 border-hairline bg-background font-mono text-xs"
+                />
+                <Input
+                  value={utmTerm}
+                  onChange={(e) => setUtmTerm(e.target.value)}
+                  placeholder="utm_term (optional)"
+                  className="h-9 border-hairline bg-background font-mono text-xs"
+                />
+                <Input
+                  value={utmContent}
+                  onChange={(e) => setUtmContent(e.target.value)}
+                  placeholder="utm_content (optional)"
+                  className="h-9 border-hairline bg-background font-mono text-xs sm:col-span-2"
+                />
+              </div>
+              {effectiveDestination && effectiveDestination !== destination.trim() && (
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-hairline bg-background px-2.5 py-1.5">
+                  <p className="truncate font-mono text-[11px] text-brand">
+                    {effectiveDestination}
+                  </p>
+                  <CopyButton value={effectiveDestination} label="Copy tagged URL" />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+            <div className="flex h-11 flex-1 items-center rounded-xl border border-hairline bg-surface-muted pl-3 font-mono text-sm text-muted-foreground">
               <span className="shrink-0 truncate">{`${SITE_HOST}/s/`}</span>
               <Input
                 value={slug}
                 onChange={(e) => setSlug(e.target.value.replace(/[^A-Za-z0-9_-]/g, ""))}
                 placeholder="custom-slug (optional)"
                 maxLength={40}
-                className="h-11 border-0 bg-transparent font-mono shadow-none focus-visible:ring-0"
+                className="h-full border-0 bg-transparent font-mono shadow-none focus-visible:ring-0"
               />
             </div>
             <Button
               type="submit"
               variant="hero"
               size="lg"
+              className="h-11 shrink-0"
               disabled={!owner || !destination.trim() || createMut.isPending}
             >
               {createMut.isPending ? (
@@ -314,7 +526,7 @@ function LinksPage() {
               Shorten
             </Button>
           </div>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
             Short links use a standard 302 redirect. Local/internal addresses, non-http(s) schemes,
             embedded credentials and links to other short links are rejected. Links are tied to this
             browser.
@@ -329,8 +541,10 @@ function LinksPage() {
               { label: "Total clicks", value: totalClicks },
             ].map((s) => (
               <div key={s.label} className="panel animate-rise p-3 text-center sm:p-4">
-                <p className="text-xl font-bold text-foreground sm:text-2xl">{s.value}</p>
-                <p className="text-[11px] text-muted-foreground">{s.label}</p>
+                <p className="text-xl font-bold tabular-nums text-foreground sm:text-2xl">
+                  {s.value}
+                </p>
+                <p className="mt-0.5 text-[11px] font-medium text-muted-foreground">{s.label}</p>
               </div>
             ))}
           </div>
@@ -360,19 +574,40 @@ function LinksPage() {
               disabled={!owner || importingCsv}
               onClick={() => csvInputRef.current?.click()}
             >
-              {importingCsv ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
+              {importingCsv ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Upload className="size-3.5" />
+              )}
               <span className="hidden sm:inline">Import CSV</span>
             </Button>
             {all.length > 0 && (
-              <Button
-                variant="subtle"
-                size="sm"
-                className="shrink-0"
-                onClick={() => exportCsv(filtered, origin)}
-              >
-                <Download className="size-3.5" />
-                <span className="hidden sm:inline">Export CSV</span>
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="subtle"
+                  size="sm"
+                  className="shrink-0"
+                  disabled={checkingHealth || filtered.length === 0}
+                  onClick={() => void handleCheckHealth()}
+                >
+                  {checkingHealth ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <HeartPulse className="size-3.5 text-brand" />
+                  )}
+                  <span className="hidden sm:inline">Check Health</span>
+                </Button>
+                <Button
+                  variant="subtle"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => exportCsv(filtered, origin)}
+                >
+                  <Download className="size-3.5" />
+                  <span className="hidden sm:inline">Export CSV</span>
+                </Button>
+              </>
             )}
           </div>
 
@@ -397,11 +632,12 @@ function LinksPage() {
                 const editingRules = rulesId === l.id;
                 const confirmingDelete = confirmDeleteId === l.id;
                 const ruleList = (Array.isArray(l.rules) ? l.rules : []) as LinkRule[];
+                const health = healthMap[l.id];
                 return (
                   <li key={l.id} className="flex flex-col gap-2 py-3">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <a
                             href={shortUrl}
                             target="_blank"
@@ -419,6 +655,25 @@ function LinksPage() {
                           {ruleList.length > 0 && (
                             <span className="rounded-full bg-brand/10 px-2 py-0.5 text-[10px] font-semibold text-brand">
                               {ruleList.length} rule{ruleList.length === 1 ? "" : "s"}
+                              {ruleList.some(
+                                (r) =>
+                                  r.enabled && r.conditions.some((c) => c.field === "ab_split"),
+                              )
+                                ? " · A/B Split"
+                                : ""}
+                            </span>
+                          )}
+                          {health && (
+                            <span
+                              className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${
+                                health.ok
+                                  ? "bg-status-2xx-bg text-status-2xx"
+                                  : "bg-status-5xx-bg text-status-5xx"
+                              }`}
+                              title={health.error ?? health.finalUrl ?? undefined}
+                            >
+                              {health.status ?? "ERR"} {health.ok ? "OK" : health.statusText} ·{" "}
+                              {health.latencyMs}ms
                             </span>
                           )}
                         </div>
@@ -624,7 +879,7 @@ function LinksPage() {
                     )}
 
                     {viewingAnalytics && owner && (
-                      <LinkAnalyticsPanel id={l.id} slug={l.slug} owner={owner} />
+                      <LinkAnalyticsPanel id={l.id} slug={l.slug} owner={owner} rules={ruleList} />
                     )}
 
                     {editingRules && owner && (
@@ -646,6 +901,34 @@ function LinksPage() {
           )}
         </section>
 
+        <BrowserExtensionPanel />
+
+        <footer className="space-y-2 border-t border-hairline pt-4 text-center font-mono text-[11px] leading-relaxed text-muted-foreground">
+          <nav
+            aria-label="Footer navigation"
+            className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px]"
+          >
+            <Link to="/" className="hover:text-foreground">
+              Redirect Chain Analyzer
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/links" className="hover:text-foreground">
+              Short Links &amp; UTM Builder
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link to="/api-docs" className="hover:text-foreground">
+              Chain Tracer JSON API
+            </Link>
+            <span aria-hidden="true">·</span>
+            <a href="/sitemap.xml" className="hover:text-foreground">
+              Sitemap
+            </a>
+            <span aria-hidden="true">·</span>
+            <a href="/llms.txt" className="hover:text-foreground">
+              LLMs.txt
+            </a>
+          </nav>
+        </footer>
         <AdsterraNativeBanner />
       </main>
     </div>

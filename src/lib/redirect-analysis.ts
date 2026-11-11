@@ -117,6 +117,8 @@ const REDIRECTING_MECHANISMS = new Set([
   "http-redirect",
   "javascript-redirect",
   "meta-refresh",
+  "form-redirect",
+  "gateway-unwrap",
   "browser-navigation",
 ]);
 
@@ -254,14 +256,24 @@ export function buildIssues(
         hopIndex: hop.index,
       });
     }
-    if (hop.mechanism === "javascript-redirect" || hop.mechanism === "meta-refresh") {
+    if (
+      hop.mechanism === "javascript-redirect" ||
+      hop.mechanism === "meta-refresh" ||
+      hop.mechanism === "form-redirect" ||
+      hop.mechanism === "gateway-unwrap"
+    ) {
+      const titleMap: Record<string, string> = {
+        "meta-refresh": "Meta refresh redirect",
+        "javascript-redirect": hop.forensics?.deobfuscationSteps?.length
+          ? "De-obfuscated JavaScript redirect"
+          : "JavaScript redirect inside a 200 response",
+        "form-redirect": "Auto-submitted HTML <form> redirect",
+        "gateway-unwrap": "Unwrapped nested gateway / encoded redirect parameter",
+      };
       push({
         id: `client-redirect-${hop.index}`,
         level: "info",
-        title:
-          hop.mechanism === "meta-refresh"
-            ? "Meta refresh redirect"
-            : "JavaScript redirect inside a 200 response",
+        title: titleMap[hop.mechanism] ?? "Client-side redirect",
         detail: `${hop.url} → ${hop.nextUrl ?? "unknown"}${hop.mechanismDetail ? ` (${hop.mechanismDetail})` : ""}`,
         hopIndex: hop.index,
       });
@@ -285,7 +297,7 @@ export function buildIssues(
         hopIndex: hop.index,
       });
     }
-    if (hop.status >= 500) {
+    if (hop.status >= 500 && hop.mechanism !== "gateway-unwrap") {
       push({
         id: `server-error-${hop.index}`,
         level: "error",
@@ -293,7 +305,7 @@ export function buildIssues(
         detail: `${hop.url} responded with ${hop.status} ${hop.statusText}.`,
         hopIndex: hop.index,
       });
-    } else if (hop.status >= 400) {
+    } else if (hop.status >= 400 && hop.mechanism !== "gateway-unwrap") {
       push({
         id: `client-error-${hop.index}`,
         level: "error",
@@ -366,7 +378,10 @@ export function buildIssues(
   if (finalHop && opts.page?.canonical) {
     try {
       const resolvedCanon = new URL(opts.page.canonical, finalHop.url).toString();
-      if (normalizeComparableUrl(resolvedCanon) !== normalizeComparableUrl(stripTrackingParams(finalHop.url))) {
+      if (
+        normalizeComparableUrl(resolvedCanon) !==
+        normalizeComparableUrl(stripTrackingParams(finalHop.url))
+      ) {
         push({
           id: "canonical-mismatch",
           level: "warning",
@@ -393,10 +408,19 @@ export function buildIssues(
   return issues;
 }
 
-export function buildSeo(
-  hops: RedirectHop[],
-  page: { canonical: string | null; metaRobots: string | null },
-): SeoInfo {
+export interface PageMetaInput {
+  canonical: string | null;
+  metaRobots: string | null;
+  title?: string | null;
+  description?: string | null;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogImage?: string | null;
+  twitterCard?: string | null;
+  hreflangCount?: number;
+}
+
+export function buildSeo(hops: RedirectHop[], page: PageMetaInput): SeoInfo {
   const final = hops[hops.length - 1];
   const finalUrl = final?.url ?? "";
   const cleanFinalUrl = finalUrl ? stripTrackingParams(finalUrl) : "";
@@ -404,7 +428,11 @@ export function buildSeo(
   const hsts = Boolean(final?.headers?.["strict-transport-security"]);
   const cacheControl = final?.headers?.["cache-control"] ?? null;
   const temporaryRedirectsCount = hops.filter(
-    (h) => h.status === 302 || h.status === 307 || h.mechanism === "meta-refresh" || h.mechanism === "javascript-redirect",
+    (h) =>
+      h.status === 302 ||
+      h.status === 307 ||
+      h.mechanism === "meta-refresh" ||
+      h.mechanism === "javascript-redirect",
   ).length;
 
   let canonicalStatus: "match" | "mismatch" | "missing" = "missing";
@@ -421,6 +449,15 @@ export function buildSeo(
     }
   }
 
+  let resolvedOgImage = page.ogImage ?? null;
+  if (resolvedOgImage && finalUrl) {
+    try {
+      resolvedOgImage = new URL(resolvedOgImage, finalUrl).toString();
+    } catch {
+      /* keep raw */
+    }
+  }
+
   return {
     finalStatus: final?.status ?? null,
     https: final ? final.protocol === "https" : false,
@@ -433,6 +470,13 @@ export function buildSeo(
     canonicalStatus,
     temporaryRedirectsCount,
     cleanFinalUrl,
+    title: page.title ?? null,
+    description: page.description ?? null,
+    ogTitle: page.ogTitle ?? null,
+    ogDescription: page.ogDescription ?? null,
+    ogImage: resolvedOgImage,
+    twitterCard: page.twitterCard ?? null,
+    hreflangCount: page.hreflangCount ?? 0,
   };
 }
 
@@ -441,7 +485,7 @@ export function assemble(params: {
   hops: RedirectHop[];
   redirectLoop: boolean;
   truncated: boolean;
-  page: { canonical: string | null; metaRobots: string | null };
+  page: PageMetaInput;
   source: "live" | "demo";
   error?: string | null;
   userAgentPreset?: UserAgentPreset;
@@ -474,10 +518,9 @@ export function assemble(params: {
     ...(preset
       ? {
           userAgentPreset: preset,
-          userAgentLabel: USER_AGENT_PRESETS[preset]?.label ?? USER_AGENT_PRESETS["desktop-chrome"].label,
+          userAgentLabel:
+            USER_AGENT_PRESETS[preset]?.label ?? USER_AGENT_PRESETS["desktop-chrome"].label,
         }
       : {}),
   };
 }
-
-

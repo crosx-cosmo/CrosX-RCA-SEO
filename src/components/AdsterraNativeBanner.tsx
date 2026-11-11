@@ -49,8 +49,7 @@ export function AdsterraNativeBanner() {
     if (!host || typeof document === "undefined") return;
 
     const container = getOrCreateSharedContainer();
-    const hasRenderedAd =
-      container.childElementCount > 0 || container.innerHTML.trim().length > 0;
+    const hasRenderedAd = container.childElementCount > 0 || container.innerHTML.trim().length > 0;
 
     // Move the persistent Adsterra container into the active page's banner slot
     // so client-side navigation (e.g. "/" -> "/links") keeps rendered ads intact.
@@ -64,12 +63,5 @@ export function AdsterraNativeBanner() {
     }
   }, []);
 
-  return (
-    <aside
-      ref={hostRef}
-      aria-label="Advertisement"
-      className="min-h-[1px] w-full min-w-0"
-    />
-  );
+  return <aside ref={hostRef} aria-label="Advertisement" className="min-h-[1px] w-full min-w-0" />;
 }
-

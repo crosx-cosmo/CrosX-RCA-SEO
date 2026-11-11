@@ -1,4 +1,13 @@
-import { CalendarClock, Download, FileJson, FileText, Link2, TriangleAlert } from "lucide-react";
+import {
+  CalendarClock,
+  Download,
+  FileCheck2,
+  FileCode2,
+  FileJson,
+  FileText,
+  Link2,
+  TriangleAlert,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -15,22 +24,55 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { downloadFile, toJson, toReport } from "@/lib/redirect-export";
+import { downloadFile, toJson, toReport, toSeoAuditCsv } from "@/lib/redirect-export";
+import { toFlowchartSvg, toHar } from "@/lib/redirect-har";
 import type { RedirectAnalysis } from "@/lib/redirect-types";
 import { ChainTab } from "./ChainTab";
+import { CloakingMatrixPanel } from "./CloakingMatrixPanel";
 import { CopyButton } from "./CopyButton";
 import { HeadersTab } from "./HeadersTab";
 import { RawTab } from "./RawTab";
 import { SeoTab } from "./SeoTab";
+import { ServerRulesTab } from "./ServerRulesTab";
 import { ShareButton } from "./ShareButton";
 import { SummaryCards } from "./SummaryCards";
+import { ThreatScannerTab } from "./ThreatScannerTab";
 import { TrackingTab } from "./TrackingTab";
+import { VisualGraphTab } from "./VisualGraphTab";
 
 const SECTIONS = [
-  { value: "chain", label: "Redirect chain", description: "Every hop, status and timing" },
-  { value: "headers", label: "Response headers", description: "Per-hop HTTP headers" },
-  { value: "seo", label: "SEO signals", description: "Canonical, robots, protocol checks" },
+  {
+    value: "chain",
+    label: "Redirect chain & waterfall",
+    description: "Every hop, status and latency waterfall",
+  },
+  {
+    value: "graph",
+    label: "Visual redirect graph & HAR export",
+    description: "Interactive flowchart, domain transitions, waterfall & .har / .svg export",
+  },
+  {
+    value: "threat",
+    label: "Phishing, malware & threat intelligence scanner",
+    description: "Trust score (0–100), Punycode homographs, brand spoofing & security headers",
+  },
+  {
+    value: "seo",
+    label: "SEO signals & SERP preview",
+    description: "Canonical, robots, SERP & social cards",
+  },
+  {
+    value: "rules",
+    label: "Server redirect rules",
+    description: "Nginx, Apache .htaccess, Cloudflare, Vercel & Netlify 301",
+  },
+  {
+    value: "cloaking",
+    label: "Multi-agent cloaking check",
+    description: "Compare Desktop, Mobile & Googlebot routing",
+  },
   { value: "tracking", label: "Tracking parameters", description: "Affiliate and UTM diffs" },
+  { value: "headers", label: "Response headers", description: "Per-hop HTTP headers" },
   { value: "raw", label: "Raw data", description: "Unmodified analysis payload" },
 ] as const;
 
@@ -68,13 +110,23 @@ export function ReportView({
   const analyzedAt = formatDate(result.analyzedAt);
   const base = `crosx-redirect-report-${slug(result.startUrl)}`;
 
-  function download(kind: "txt" | "json") {
+  function download(kind: "txt" | "json" | "seo-csv" | "har" | "svg") {
     if (kind === "txt") {
       downloadFile(`${base}.txt`, toReport([result]), "text/plain");
+      toast.success("Report downloaded");
+    } else if (kind === "seo-csv") {
+      downloadFile(`${base}-seo-audit.csv`, toSeoAuditCsv([result]), "text/csv");
+      toast.success("SEO Audit CSV downloaded");
+    } else if (kind === "har") {
+      downloadFile(`${base}.har`, toHar([result]), "application/json");
+      toast.success("HTTP Archive (.har) downloaded");
+    } else if (kind === "svg") {
+      downloadFile(`${base}-flowchart.svg`, toFlowchartSvg(result), "image/svg+xml");
+      toast.success("Flowchart SVG downloaded");
     } else {
       downloadFile(`${base}.json`, toJson([result]), "application/json");
+      toast.success("JSON downloaded");
     }
-    toast.success(kind === "txt" ? "Report downloaded" : "JSON downloaded");
   }
 
   return (
@@ -127,6 +179,18 @@ export function ReportView({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => download("seo-csv")}>
+                  <FileCheck2 className="size-3.5 text-brand" />
+                  SEO Audit (.csv)
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => download("har")}>
+                  <FileCode2 className="size-3.5 text-brand" />
+                  HTTP Archive (.har)
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => download("svg")}>
+                  <FileCode2 className="size-3.5" />
+                  Visual Flowchart (.svg)
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => download("txt")}>
                   <FileText className="size-3.5" />
                   Report (.txt)
@@ -159,7 +223,9 @@ export function ReportView({
           <div className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-brand/25 bg-brand/5 px-3 py-2 text-[11.5px] text-muted-foreground">
             <span className="min-w-0">
               Clean URL (tracking stripped):{" "}
-              <span className="break-all font-mono text-foreground">{result.seo.cleanFinalUrl}</span>
+              <span className="break-all font-mono text-foreground">
+                {result.seo.cleanFinalUrl}
+              </span>
             </span>
             <CopyButton value={result.seo.cleanFinalUrl} label="Copy clean URL" />
           </div>
@@ -185,7 +251,11 @@ export function ReportView({
       </section>
 
       {/* Collapsible detail sections */}
-      <Accordion type="multiple" defaultValue={["chain", "seo"]} className="space-y-3">
+      <Accordion
+        type="multiple"
+        defaultValue={["chain", "graph", "threat", "seo", "rules", "cloaking"]}
+        className="space-y-3"
+      >
         {SECTIONS.map((section, i) => (
           <AccordionItem
             key={section.value}
@@ -205,9 +275,13 @@ export function ReportView({
             </AccordionTrigger>
             <AccordionContent className="pb-5">
               {section.value === "chain" ? <ChainTab result={result} /> : null}
-              {section.value === "headers" ? <HeadersTab result={result} /> : null}
+              {section.value === "graph" ? <VisualGraphTab result={result} /> : null}
+              {section.value === "threat" ? <ThreatScannerTab result={result} /> : null}
               {section.value === "seo" ? <SeoTab result={result} /> : null}
+              {section.value === "rules" ? <ServerRulesTab result={result} /> : null}
+              {section.value === "cloaking" ? <CloakingMatrixPanel result={result} /> : null}
               {section.value === "tracking" ? <TrackingTab result={result} /> : null}
+              {section.value === "headers" ? <HeadersTab result={result} /> : null}
               {section.value === "raw" ? <RawTab result={result} /> : null}
             </AccordionContent>
           </AccordionItem>

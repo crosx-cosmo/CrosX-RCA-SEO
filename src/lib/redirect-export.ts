@@ -1,3 +1,4 @@
+import { gradeSeoAnalysis } from "./redirect-rules-codegen";
 import type { RedirectAnalysis } from "./redirect-types";
 
 export function toJson(results: RedirectAnalysis[]): string {
@@ -7,6 +8,53 @@ export function toJson(results: RedirectAnalysis[]): string {
 function csvCell(value: unknown): string {
   const s = value === null || value === undefined ? "" : String(value);
   return `"${s.replace(/"/g, '""')}"`;
+}
+
+export function toSeoAuditCsv(results: RedirectAnalysis[]): string {
+  const header = [
+    "seo_grade",
+    "seo_score",
+    "start_url",
+    "final_url",
+    "clean_final_url",
+    "final_status",
+    "total_redirects",
+    "temporary_redirects",
+    "total_latency_ms",
+    "https",
+    "hsts",
+    "canonical_status",
+    "canonical_url",
+    "meta_robots",
+    "page_title",
+    "lost_tracking_params",
+    "audit_notes",
+  ];
+  const rows = results.map((r) => {
+    const audit = gradeSeoAnalysis(r);
+    return [
+      audit.grade,
+      audit.score,
+      r.startUrl,
+      r.finalUrl,
+      r.seo.cleanFinalUrl ?? r.finalUrl,
+      r.finalStatus ?? "",
+      r.totalRedirects,
+      r.seo.temporaryRedirectsCount ?? 0,
+      r.totalResponseTimeMs,
+      r.seo.https ? "Yes" : "No",
+      r.seo.hsts ? "Yes" : "No",
+      r.seo.canonicalStatus ?? "missing",
+      r.seo.canonical ?? "",
+      r.seo.metaRobots ?? "",
+      r.seo.title ?? "",
+      r.tracking.lostTrackingParams.join("; "),
+      audit.notes.join("; "),
+    ]
+      .map(csvCell)
+      .join(",");
+  });
+  return [header.map(csvCell).join(","), ...rows].join("\n");
 }
 
 export function toCsv(results: RedirectAnalysis[]): string {

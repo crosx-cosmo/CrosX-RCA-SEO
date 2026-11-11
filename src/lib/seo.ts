@@ -5,9 +5,7 @@ const rawEnvSiteUrl =
   (typeof process !== "undefined" ? process.env["SITE_URL"]?.trim() : undefined);
 
 const resolvedSiteUrl =
-  rawEnvSiteUrl && !rawEnvSiteUrl.endsWith(".lovable.app")
-    ? rawEnvSiteUrl
-    : CROSX_SITE_URL;
+  rawEnvSiteUrl && !rawEnvSiteUrl.endsWith(".lovable.app") ? rawEnvSiteUrl : CROSX_SITE_URL;
 
 export const SITE_URL = resolvedSiteUrl.replace(/\/+$/, "");
 export const SITE_HOST = (() => {
@@ -32,16 +30,49 @@ export const CORE_KEYWORDS = [
   "307 308 redirect analyzer",
   "meta refresh redirect checker",
   "javascript redirect detector",
+  "hidden redirect detector",
+  "obfuscated javascript redirect tracer",
+  "bot cloaking checker",
   "affiliate link tracker",
   "cloaked link unshortener",
+  "link unshortener",
   "utm parameter tracker",
   "redirect loop detector",
   "canonical url checker",
   "http response headers viewer",
+  "server redirect rule generator",
   "bulk redirect checker",
   "short link generator",
   "trace url hops",
   "seo redirect audit tool",
+  "rca.crosx.in",
+  "CROSX",
+].join(", ");
+
+export const LINKS_KEYWORDS = [
+  "transparent short link generator",
+  "custom url shortener",
+  "302 redirect shortener",
+  "qr code link generator",
+  "smart redirect rules",
+  "geo device url routing",
+  "utm campaign builder",
+  "bulk csv short links",
+  "link click analytics",
+  "destination health checker",
+  "rca.crosx.in",
+  "CROSX",
+].join(", ");
+
+export const API_DOCS_KEYWORDS = [
+  "redirect trace api",
+  "url unshortener json api",
+  "redirect chain checker api",
+  "server-side redirect tracer endpoint",
+  "affiliate link audit api",
+  "javascript redirect detection api",
+  "seo redirect checker webhook",
+  "rca.api.crosx.in",
   "rca.crosx.in",
   "CROSX",
 ].join(", ");
@@ -131,6 +162,14 @@ export function buildHomeStructuredData(description: string): string {
         description,
         publisher: { "@id": `${SITE_URL}/#organization` },
         inLanguage: "en-US",
+        potentialAction: {
+          "@type": "SearchAction",
+          target: {
+            "@type": "EntryPoint",
+            urlTemplate: `${SITE_URL}/?url={search_term_string}`,
+          },
+          "query-input": "required name=search_term_string",
+        },
       },
       {
         "@type": "WebPage",
@@ -143,7 +182,7 @@ export function buildHomeStructuredData(description: string): string {
         inLanguage: "en-US",
         speakable: {
           "@type": "SpeakableSpecification",
-          cssSelector: ["h1", "h2"],
+          cssSelector: ["h1", "h2", "#seo-guide-heading"],
         },
       },
       {
@@ -166,14 +205,16 @@ export function buildHomeStructuredData(description: string): string {
         },
         publisher: { "@id": `${SITE_URL}/#organization` },
         featureList: [
-          "Server-side HTTP 301, 302, 303, 307, and 308 redirect chain tracing",
-          "HTML meta http-equiv refresh redirect detection",
-          "JavaScript window.location and location.replace redirect extraction",
-          "Headless browser navigation fallback for script-gated hops",
-          "Affiliate click_id, gclid, fbclid, and UTM tracking parameter diffing",
-          "SEO canonical tag, meta robots, and HTTPS protocol upgrade/downgrade audit",
-          "Bulk URL analysis up to 20 URLs per batch with TXT and JSON report export",
-          "SSRF-hardened server-side execution with per-hop latency timings",
+          "Server-side HTTP 301, 302, 303, 307, and 308 redirect chain tracing up to 20 hops",
+          "HTML meta http-equiv refresh and HTTP Refresh header redirect detection",
+          "Sandboxed JavaScript VM de-obfuscation for Base64, Hex, ROT13, charCode, eval(), and window.location hops",
+          "Headless Chromium fallback for script-gated and delayed client-side redirects",
+          "Stateful per-hop Cookie Jar and embedded gateway parameter unwrapping",
+          "Multi-Agent Bot Cloaking Matrix comparing Desktop Chrome, Mobile Safari, and Googlebot Smartphone",
+          "Affiliate click_id, gclid, fbclid, msclkid, and UTM tracking parameter diffing with Clean URL generator",
+          "SEO health scoring (0–100), canonical alignment, HSTS, X-Robots-Tag, and SERP/Social card preview",
+          "One-click Server Redirect Rule Generator for Nginx, Apache .htaccess, Cloudflare, Vercel, and Netlify",
+          "Bulk URL analysis up to 20 URLs per batch with CSV, JSON, Markdown, and plain-text export",
         ],
       },
       {
@@ -205,14 +246,14 @@ export function buildHomeStructuredData(description: string): string {
           {
             "@type": "HowToStep",
             position: 2,
-            name: "Run Server-Side Redirect Trace",
-            text: "Click Analyze to trace the full chain server-side across HTTP 301/302/307/308 redirects, meta refresh tags, and JavaScript navigation.",
+            name: "Select User-Agent Profile and Run Server-Side Trace",
+            text: "Choose Desktop Chrome, Mobile Safari, or Googlebot Smartphone and click Analyze to trace HTTP 301/302/307/308 redirects, meta refresh tags, and obfuscated JavaScript hops.",
           },
           {
             "@type": "HowToStep",
             position: 3,
-            name: "Inspect Hops, Headers, SEO Signals & Tracking Diffs",
-            text: "Review hop-by-hop response times, HTTP headers, canonical URLs, HTTPS status, and dropped UTM or affiliate parameters, then export to JSON or TXT.",
+            name: "Inspect Hops, Forensics, Cloaking Matrix & Server Rules",
+            text: "Review hop-by-hop latency, HTTP headers, decoded script payloads, canonical URLs, dropped UTM parameters, and copy auto-generated 301 consolidation rules or export to CSV/JSON.",
           },
         ],
       },
@@ -222,26 +263,42 @@ export function buildHomeStructuredData(description: string): string {
         mainEntity: [
           {
             "@type": "Question",
-            name: "What redirect mechanisms does Redirect Chain Analyzer detect?",
+            name: "What is a redirect chain and why does it hurt SEO and conversions?",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "Redirect Chain Analyzer performs real server-side requests to trace HTTP status redirects (301, 302, 303, 307, 308), HTML meta refresh tags, inline JavaScript redirects, and headless browser navigations up to 20 hops.",
+              text: "A redirect chain occurs when a URL forwards through multiple intermediate hops (Hop A → Hop B → Hop C) before reaching the final landing page. Each extra hop adds DNS, TLS, and HTTP round-trip latency (hurting Core Web Vitals like LCP and TTFB), risks losing Googlebot crawl budget after 5–10 hops, and frequently strips UTM or affiliate click IDs when cross-domain redirects are misconfigured.",
             },
           },
           {
             "@type": "Question",
-            name: "How do long redirect chains affect technical SEO and page speed?",
+            name: "How does Redirect Chain Analyzer detect JavaScript and meta refresh redirects?",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "Each redirect hop adds network round-trip latency (TTFB), wastes search engine crawl budget, risks dropping canonical or UTM parameters, and can dilute link equity if temporary redirects or protocol downgrades occur.",
+              text: 'Unlike basic HTTP header checkers that stop at status 200, our server-side trace engine inspects HTML responses for <meta http-equiv="refresh"> tags, canonical headers, and inline JavaScript navigation patterns (window.location, location.href, location.replace, location.assign), executing obfuscated scripts inside a sandboxed VM and escalating to a headless browser when cloaked client-side hops are detected.',
             },
           },
           {
             "@type": "Question",
-            name: "Does the analyzer detect lost UTM and affiliate tracking parameters?",
+            name: "Why should I test URLs with different User-Agent profiles (Googlebot vs Mobile vs Desktop)?",
             acceptedAnswer: {
               "@type": "Answer",
-              text: "Yes. Every hop's query string is diffed automatically, highlighting added, modified, or stripped tracking parameters including utm_*, gclid, fbclid, msclkid, click_id, aff_id, and sub1–sub10.",
+              text: "Many affiliate networks, geo-routers, and CDNs serve different redirect chains depending on the visitor's User-Agent. Switching between Desktop Chrome, iPhone iOS, Android Chrome, Googlebot Smartphone, and Social Preview bots exposes conditional redirects, mobile-only app-store traps, and SEO cloaking.",
+            },
+          },
+          {
+            "@type": "Question",
+            name: "What is the SEO difference between 301, 302, 307, and 308 redirects?",
+            acceptedAnswer: {
+              "@type": "Answer",
+              text: "301 (Moved Permanently) and 308 (Permanent Redirect, preserving HTTP method) instruct search engines to transfer indexing signals and canonical authority permanently to the destination URL. 302 (Found) and 307 (Temporary Redirect) signal a temporary move, which can leave search engines indexing the old URL if left in place long-term.",
+            },
+          },
+          {
+            "@type": "Question",
+            name: "How does the tracking parameter diff and Clean URL stripper work?",
+            acceptedAnswer: {
+              "@type": "Answer",
+              text: "Every hop's query string is parsed and compared against the previous hop. We highlight added, modified, or dropped parameters (such as utm_source, gclid, fbclid, click_id, aff_id, subid) and automatically generate a clean, canonical destination URL with tracking noise stripped for one-click sharing.",
             },
           },
         ],
@@ -265,16 +322,27 @@ export function buildLinksStructuredData(description: string): string {
         inLanguage: "en-US",
       },
       {
-        "@type": "SoftwareApplication",
+        "@type": ["WebApplication", "SoftwareApplication"],
+        "@id": `${url}#webapp`,
         name: "CROSX Transparent Short Link Manager",
         url,
         description,
         applicationCategory: "DeveloperApplication",
         operatingSystem: "Any",
+        isAccessibleForFree: true,
         offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+        publisher: { "@id": `${SITE_URL}/#organization` },
+        featureList: [
+          "Custom slug 302 short links with SSRF destination validation",
+          "Built-in UTM Campaign Builder for utm_source, utm_medium, utm_campaign, utm_term, and utm_content",
+          "Downloadable SVG and PNG QR codes for every short link",
+          "Conditional smart routing rules by Country, Device, OS, Browser, Query parameter, and UTC schedule",
+          "Batch Destination Health Checker and Bulk CSV import/export",
+        ],
       },
       {
         "@type": "BreadcrumbList",
+        "@id": `${url}#breadcrumb`,
         itemListElement: [
           {
             "@type": "ListItem",
@@ -315,14 +383,16 @@ export function buildApiDocsStructuredData(description: string): string {
       },
       {
         "@type": "WebAPI",
+        "@id": `${url}#webapi`,
         name: "CROSX Chain Tracer JSON API",
         description,
         documentation: url,
         termsOfService: `${SITE_URL}/api-docs`,
-        provider: { "@type": "Organization", name: BRAND_NAME },
+        provider: { "@id": `${SITE_URL}/#organization` },
       },
       {
         "@type": "BreadcrumbList",
+        "@id": `${url}#breadcrumb`,
         itemListElement: [
           {
             "@type": "ListItem",
@@ -375,4 +445,3 @@ export function buildSharedReportStructuredData(description: string): string {
     ],
   });
 }
-

@@ -5,11 +5,59 @@ export type HopMechanism =
   | "http-redirect"
   | "javascript-redirect"
   | "meta-refresh"
+  | "form-redirect"
+  | "gateway-unwrap"
   | "browser-navigation"
   | "final-response"
   | "blocked"
   | "unresolved"
   | "error";
+
+export interface HopCookieInfo {
+  name: string;
+  valuePreview: string;
+  flags: string[];
+}
+
+export interface EmbeddedTargetInfo {
+  source: string;
+  url: string;
+  encoding: "raw" | "url-encoded" | "double-url-encoded" | "base64" | "hex" | "gateway-path";
+}
+
+export interface HiddenPageArtifact {
+  kind:
+    | "iframe"
+    | "form-action"
+    | "data-url"
+    | "base64-script-url"
+    | "interstitial-link"
+    | "hydration-url";
+  label: string;
+  url: string;
+}
+
+export interface HopForensics {
+  /** Step-by-step trace of how an obfuscated or secret redirect was decoded. */
+  deobfuscationSteps?: string[];
+  /** Cookies set by the server on this hop via Set-Cookie. */
+  cookiesSet?: HopCookieInfo[];
+  /** Cookie names sent to the server on this hop from prior hops in the chain. */
+  cookiesSent?: string[];
+  /** Referer header sent on this hop. */
+  refererSent?: string | null;
+  /** Target URLs discovered embedded inside this hop's URL query/path. */
+  embeddedTargets?: EmbeddedTargetInfo[];
+  /** Hidden or secondary URLs discovered in the HTML body (iframes, data-url, base64, forms). */
+  hiddenArtifacts?: HiddenPageArtifact[];
+  /** Security header posture on this hop. */
+  securityHeaders?: {
+    hsts: boolean;
+    csp: boolean;
+    xFrameOptions: string | null;
+    referrerPolicy: string | null;
+  };
+}
 
 export interface RedirectHop {
   index: number;
@@ -39,6 +87,8 @@ export interface RedirectHop {
   blockedReason?: string | null;
   /** IP addresses the hostname resolved to during the safety check. */
   addresses?: string[];
+  /** Deep forensic telemetry for secret, obfuscated, or cookie-gated hops. */
+  forensics?: HopForensics;
 }
 
 export interface AnalysisIssue {
@@ -69,6 +119,13 @@ export interface SeoInfo {
   canonicalStatus?: "match" | "mismatch" | "missing";
   temporaryRedirectsCount?: number;
   cleanFinalUrl?: string;
+  title?: string | null;
+  description?: string | null;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogImage?: string | null;
+  twitterCard?: string | null;
+  hreflangCount?: number;
 }
 
 export type ParamChangeKind = "added" | "removed" | "modified";
@@ -127,4 +184,3 @@ export interface RedirectAnalysis {
   /** Reason the browser fallback could not run, when it was needed. */
   browserFallbackNote?: string | null;
 }
-

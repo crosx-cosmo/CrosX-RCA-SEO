@@ -14,7 +14,8 @@ export type RuleField =
   | "utm_campaign"
   | "weekday"
   | "hour"
-  | "date";
+  | "date"
+  | "ab_split";
 
 export type RuleOp = "is" | "is_not" | "contains" | "between" | "before" | "after" | "exists";
 
@@ -41,6 +42,8 @@ export interface VisitorContext {
   os: string;
   query: Record<string, string>;
   now: Date;
+  /** Optional 0–99 bucket for deterministic A/B split testing; defaults to random 0–99 if omitted. */
+  bucket?: number;
 }
 
 export const FIELD_LABEL: Record<RuleField, string> = {
@@ -55,6 +58,7 @@ export const FIELD_LABEL: Record<RuleField, string> = {
   weekday: "Day of week (UTC)",
   hour: "Hour of day (UTC)",
   date: "Date (UTC)",
+  ab_split: "A/B Traffic Split (%)",
 };
 
 export const FIELD_OPS: Record<RuleField, RuleOp[]> = {
@@ -69,6 +73,7 @@ export const FIELD_OPS: Record<RuleField, RuleOp[]> = {
   weekday: ["is", "is_not"],
   hour: ["between"],
   date: ["before", "after"],
+  ab_split: ["between", "is"],
 };
 
 export const OP_LABEL: Record<RuleOp, string> = {
@@ -92,7 +97,16 @@ const list = (v: string) =>
 
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
-function conditionMatches(c: RuleCondition, ctx: VisitorContext): boolean {
+function resolveVisitorBucket(ctx: VisitorContext): number {
+  if (typeof ctx.bucket === "number" && Number.isFinite(ctx.bucket)) {
+    return ((Math.floor(ctx.bucket) % 100) + 100) % 100;
+  }
+  const bytes = new Uint8Array(1);
+  crypto.getRandomValues(bytes);
+  return (bytes[0] ?? 0) % 100;
+}
+
+function conditionMatches(c: RuleCondition, ctx: VisitorContext, bucket: number): boolean {
   const value = c.value.trim();
   switch (c.field) {
     case "country":
@@ -123,6 +137,22 @@ function conditionMatches(c: RuleCondition, ctx: VisitorContext): boolean {
       if (Number.isNaN(t)) return false;
       return c.op === "before" ? ctx.now.getTime() < t : ctx.now.getTime() >= t;
     }
+    case "ab_split": {
+      // Supports either a percentage share e.g. "50" or "50%" (matches bucket 0..49)
+      // or an explicit bucket range e.g. "0-49" or "50-99"
+      const rangeMatch = /^(\d{1,3})\s*-\s*(\d{1,3})%?$/.exec(value);
+      if (rangeMatch) {
+        const from = Math.max(0, Math.min(99, Number(rangeMatch[1])));
+        const to = Math.max(0, Math.min(99, Number(rangeMatch[2])));
+        return bucket >= from && bucket <= to;
+      }
+      const pctMatch = /^(\d{1,3})%?$/.exec(value);
+      if (pctMatch) {
+        const pct = Math.max(0, Math.min(100, Number(pctMatch[1])));
+        return bucket < pct;
+      }
+      return false;
+    }
     case "query":
     case "utm_source":
     case "utm_medium":
@@ -147,9 +177,10 @@ function conditionMatches(c: RuleCondition, ctx: VisitorContext): boolean {
 
 /** Returns the first enabled rule (in priority order) whose conditions match. */
 export function evaluateRules(rules: LinkRule[], ctx: VisitorContext): LinkRule | null {
+  const bucket = resolveVisitorBucket(ctx);
   for (const rule of rules) {
     if (!rule.enabled || rule.conditions.length === 0) continue;
-    const results = rule.conditions.map((c) => conditionMatches(c, ctx));
+    const results = rule.conditions.map((c) => conditionMatches(c, ctx, bucket));
     const ok = rule.match === "any" ? results.some(Boolean) : results.every(Boolean);
     if (ok) return rule;
   }
@@ -201,4 +232,3 @@ export function newRuleId(): string {
   }
   return id;
 }
-

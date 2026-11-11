@@ -1,24 +1,27 @@
 # Redirect Chain Analyzer — CROSX
 
-> Universal server-side URL redirect tracer, affiliate link unshortener, technical SEO hop auditor, transparent short link manager, and developer JSON API hosted at https://rca.crosx.in.
+> Universal server-side URL redirect tracer, obfuscated JavaScript & secret-link de-obfuscator, multi-agent bot cloaking detector, technical SEO hop auditor, transparent short link manager, and developer JSON API hosted at https://rca.crosx.in.
 
 ## Overview
-Redirect Chain Analyzer by CROSX Advertising & Marketing Agency traces any URL end-to-end on the server across up to 20 hops. Unlike browser-only checkers, it follows:
+Redirect Chain Analyzer by CROSX Advertising & Marketing Agency traces any URL end-to-end on the server across up to 20 hops. Unlike basic header checkers, it follows:
 - HTTP status redirects (301 Moved Permanently, 302 Found, 303 See Other, 307 Temporary Redirect, 308 Permanent Redirect)
-- HTTP `Refresh` response headers
-- HTML `<meta http-equiv="refresh">` tags
-- Inline JavaScript navigation (`window.location`, `location.href`, `location.replace`, `location.assign`)
-- Script-gated navigation via an isolated headless-browser fallback
+- HTTP `Refresh` and `Link` canonical/redirect headers
+- HTML `<meta http-equiv="refresh">` tags (including inside `<noscript>`) and auto-submitted `<form>` redirects
+- Inline & obfuscated JavaScript navigation (`window.location`, `location.href`, `location.replace`, `location.assign`, `setTimeout`, `eval()`, `Function()`, `document.write()`, Base64 `atob()`, Hex, ROT13, `String.fromCharCode`, and array-indexed `_0x` packers) via a deterministic Node `vm` Mock-DOM sandbox
+- Embedded redirect gateway parameters (Facebook `l.php`, YouTube `redirect`, Google `/url`, Proofpoint `urldefense`, SafeLinks, AMP)
+- Script-gated navigation via an isolated headless Chromium fallback with stateful per-hop cookie jar persistence
 
 ## Core Capabilities
-- **User-Agent Simulation & Cloaking Detection**: Trace URLs as Desktop Chrome, Mobile iPhone (iOS), Mobile Android, Googlebot Smartphone, Googlebot Desktop, or Social Preview Bots.
-- **Technical SEO Audit**: Inspect final HTTP status, HTTPS protocol upgrades/downgrades, HSTS (`Strict-Transport-Security`), `Cache-Control`, `<link rel="canonical">` alignment against final URL, `<meta name="robots">`, and `X-Robots-Tag` headers.
+- **Deep Hop Forensics**: Inspect decoded secret targets, VM sandbox execution traces, `Set-Cookie` / forwarded `Cookie` continuity, DNS/TLS security headers, and body snippets for every hop.
+- **Multi-Agent Cloaking Matrix**: Simultaneously trace URLs as Desktop Chrome, Mobile Safari (iPhone), and Googlebot Smartphone to expose conditional routing, mobile app-store hijacks, and SEO bot cloaking.
+- **Technical SEO Audit & Grading (0–100)**: Evaluate final HTTP status, HTTPS protocol upgrades/downgrades, HSTS (`Strict-Transport-Security`), `Cache-Control`, `<link rel="canonical">` alignment, `<meta name="robots">`, `X-Robots-Tag`, and live Google SERP + OpenGraph/Twitter social card previews.
+- **Server Redirect Rule Generator**: Auto-generate copy-ready 301 consolidation rules for Nginx, Apache `.htaccess`, Cloudflare Bulk Redirects, `vercel.json`, and Netlify `_redirects` whenever multi-hop chains are detected.
 - **Affiliate & UTM Tracking Forensics**: Diff query parameters across every hop (`utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `gclid`, `fbclid`, `msclkid`, `click_id`, `aff_id`, `sub1`–`sub10`) and generate clean tracking-free destination URLs.
-- **Bulk URL Analysis**: Trace up to 20 URLs per batch and export results to JSON, CSV, or plain-text reports.
-- **Transparent Short Links (`/links`)**: Create SSRF-validated short URLs (`https://rca.crosx.in/s/{slug}`) with custom slugs, downloadable SVG/PNG QR codes, link expiration, conditional smart redirect rules (country, device, OS, browser, UTM/query, UTC schedule), bulk CSV import/export, and privacy-first HMAC visitor analytics.
+- **Bulk URL Analysis**: Trace up to 20 URLs per batch and export results to SEO Audit CSV, JSON, Markdown, or plain-text reports.
+- **Transparent Short Links (`/links`)**: Create SSRF-validated short URLs (`https://rca.crosx.in/s/{slug}`) with custom slugs, UTM Campaign Builder, downloadable SVG/PNG QR codes, link expiration, conditional smart redirect rules (country, device, OS, browser, UTM/query, UTC schedule), batch destination health checks, bulk CSV import/export, and privacy-first HMAC visitor analytics.
 
 ## Public Pages & Endpoints
-- [Redirect Chain Analyzer](https://rca.crosx.in/): Main interactive redirect tracer, bulk URL auditor, and SEO/tracking inspector. Supports deep linking via `https://rca.crosx.in/?url=https://example.com`.
-- [Short Links Manager](https://rca.crosx.in/links): Transparent short link creator with smart routing rules, QR codes, and click analytics.
+- [Redirect Chain Analyzer](https://rca.crosx.in/): Main interactive redirect tracer, bulk URL auditor, cloaking comparator, and SEO/tracking inspector. Supports deep linking via `https://rca.crosx.in/?url=https://example.com`.
+- [Short Links Manager](https://rca.crosx.in/links): Transparent short link creator with UTM builder, smart routing rules, health checks, QR codes, and click analytics.
 - [Chain Tracer Developer API Docs](https://rca.crosx.in/api-docs): Documentation and live playground for the JSON redirect tracing API (`POST https://rca.api.crosx.in/v1/trace` and `/api/public/trace`).
-- [Sitemap](https://rca.crosx.in/sitemap.xml): XML sitemap with `hreflang` annotations.
+- [Sitemap](https://rca.crosx.in/sitemap.xml): XML sitemap with `hreflang` and image annotations.

@@ -1,5 +1,5 @@
 import { useServerFn } from "@tanstack/react-start";
-import { ArrowDown, ArrowUp, FlaskConical, Plus, Save, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, FlaskConical, Plus, Save, Shuffle, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -40,6 +40,7 @@ const PLACEHOLDER: Record<RuleField, string> = {
   weekday: "mon, tue, sat",
   hour: "9-17",
   date: "2026-12-31T23:59",
+  ab_split: "0-49 (or 50%)",
 };
 
 export function RuleBuilder({
@@ -57,7 +58,7 @@ export function RuleBuilder({
 }) {
   const [rules, setRules] = useState<LinkRule[]>(initial);
   const [saving, setSaving] = useState(false);
-  const [test, setTest] = useState({ country: "", ua: "", query: "", when: "" });
+  const [test, setTest] = useState({ country: "", ua: "", query: "", when: "", bucket: "25" });
   const [testResult, setTestResult] = useState<string | null>(null);
   const save = useServerFn(setShortLinkRules);
 
@@ -76,6 +77,35 @@ export function RuleBuilder({
       return next;
     });
 
+  function addAbSplitPreset() {
+    if (rules.length + 2 > MAX_RULES) {
+      toast.error(`Maximum of ${MAX_RULES} rules reached`);
+      return;
+    }
+    const baseDest = defaultDestination || "https://example.com/landing";
+    const sep = baseDest.includes("?") ? "&" : "?";
+    setRules((rs) => [
+      ...rs,
+      {
+        id: newRuleId(),
+        name: "A/B Variant A (50% Traffic — Bucket 0-49)",
+        enabled: true,
+        match: "all",
+        conditions: [{ field: "ab_split", op: "between", value: "0-49" }],
+        destination: `${baseDest}${sep}utm_content=variant_a`,
+      },
+      {
+        id: newRuleId(),
+        name: "A/B Variant B (50% Traffic — Bucket 50-99)",
+        enabled: true,
+        conditions: [{ field: "ab_split", op: "between", value: "50-99" }],
+        match: "all",
+        destination: `${baseDest}${sep}utm_content=variant_b`,
+      },
+    ]);
+    toast.success("Added 50/50 A/B Split Rotator rules");
+  }
+
   function runTest() {
     const ua = test.ua || navigator.userAgent;
     const p = parseUserAgent(ua);
@@ -86,6 +116,7 @@ export function RuleBuilder({
       query = {};
     }
     const now = test.when ? new Date(`${test.when}Z`) : new Date();
+    const bucketVal = test.bucket.trim() ? Number(test.bucket.trim()) : undefined;
     const hit = evaluateRules(rules, {
       country: test.country.trim().toUpperCase() || null,
       platform: p.platform,
@@ -93,6 +124,7 @@ export function RuleBuilder({
       os: p.os,
       query,
       now,
+      ...(typeof bucketVal === "number" && !Number.isNaN(bucketVal) ? { bucket: bucketVal } : {}),
     });
     setTestResult(
       hit
@@ -188,7 +220,7 @@ export function RuleBuilder({
                   updateCond(i, k, { field, op: FIELD_OPS[field][0]!, value: "" });
                 }}
               >
-                <SelectTrigger aria-label="Condition field" className="h-9 sm:w-[170px]">
+                <SelectTrigger aria-label="Condition field" className="h-9 sm:w-[190px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -216,7 +248,9 @@ export function RuleBuilder({
               </Select>
               <Input
                 value={c.value}
-                placeholder={c.op === "exists" && c.field === "query" ? "param name" : PLACEHOLDER[c.field]}
+                placeholder={
+                  c.op === "exists" && c.field === "query" ? "param name" : PLACEHOLDER[c.field]
+                }
                 onChange={(e) => updateCond(i, k, { value: e.target.value })}
                 className="h-9 flex-1 border-hairline bg-surface-muted text-xs"
               />
@@ -225,9 +259,7 @@ export function RuleBuilder({
                 size="sm"
                 aria-label="Remove condition"
                 disabled={r.conditions.length === 1}
-                onClick={() =>
-                  update(i, { conditions: r.conditions.filter((_, j) => j !== k) })
-                }
+                onClick={() => update(i, { conditions: r.conditions.filter((_, j) => j !== k) })}
               >
                 <X className="size-3.5" />
               </Button>
@@ -280,6 +312,14 @@ export function RuleBuilder({
         >
           <Plus className="size-3.5" /> Add rule
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={rules.length + 2 > MAX_RULES}
+          onClick={addAbSplitPreset}
+        >
+          <Shuffle className="size-3.5 text-brand" /> 50/50 A/B Split Preset
+        </Button>
         <Button variant="hero" size="sm" onClick={persist} disabled={saving}>
           <Save className="size-3.5" /> {saving ? "Saving…" : "Save rules"}
         </Button>
@@ -289,7 +329,7 @@ export function RuleBuilder({
         <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
           <FlaskConical className="size-3" /> Test a visitor
         </p>
-        <div className="grid gap-2 sm:grid-cols-2">
+        <div className="grid gap-2 sm:grid-cols-3">
           <Input
             placeholder="Country code (e.g. US)"
             value={test.country}
@@ -303,10 +343,16 @@ export function RuleBuilder({
             className="h-9 border-hairline bg-surface-muted text-xs"
           />
           <Input
+            placeholder="A/B Bucket 0-99 (e.g. 25)"
+            value={test.bucket}
+            onChange={(e) => setTest({ ...test, bucket: e.target.value })}
+            className="h-9 border-hairline bg-surface-muted font-mono text-xs"
+          />
+          <Input
             placeholder="User agent (blank = this device)"
             value={test.ua}
             onChange={(e) => setTest({ ...test, ua: e.target.value })}
-            className="h-9 border-hairline bg-surface-muted text-xs"
+            className="h-9 border-hairline bg-surface-muted text-xs sm:col-span-2"
           />
           <Input
             type="datetime-local"

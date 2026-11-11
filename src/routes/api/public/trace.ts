@@ -2,12 +2,22 @@ import { createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
 
 import type { RedirectAnalysis } from "@/lib/redirect-types";
+import {
+  acquireConcurrencySlot,
+  checkRateLimit,
+  coalesceInFlight,
+  constantTimeEquals,
+  extractClientFingerprint,
+  extractClientIp,
+  inspectIncomingRequest,
+} from "@/lib/security.server";
 
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers": "content-type, accept, authorization, x-requested-with",
-  "access-control-expose-headers": "x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset",
+  "access-control-expose-headers":
+    "x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset, retry-after",
   "access-control-max-age": "86400",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -15,43 +25,8 @@ const CORS = {
 };
 
 const MAX_URLS = 5;
-const RATE_LIMIT = 30; // requests per window
-const WINDOW_MS = 60_000;
-const MAX_BUCKETS = 5_000;
-
-const buckets = new Map<string, { count: number; reset: number }>();
-
-function rateLimit(key: string) {
-  const now = Date.now();
-  if (buckets.size > MAX_BUCKETS) {
-    for (const [k, v] of buckets) {
-      if (v.reset < now) buckets.delete(k);
-    }
-  }
-  const bucket = buckets.get(key);
-  if (!bucket || bucket.reset < now) {
-    buckets.set(key, { count: 1, reset: now + WINDOW_MS });
-    return { ok: true, remaining: RATE_LIMIT - 1, reset: now + WINDOW_MS };
-  }
-  bucket.count += 1;
-  return {
-    ok: bucket.count <= RATE_LIMIT,
-    remaining: Math.max(0, RATE_LIMIT - bucket.count),
-    reset: bucket.reset,
-  };
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const bufA = enc.encode(a);
-  const bufB = enc.encode(b);
-  const len = Math.max(bufA.length, bufB.length);
-  let diff = bufA.length ^ bufB.length;
-  for (let i = 0; i < len; i++) {
-    diff |= (bufA[i] ?? 0) ^ (bufB[i] ?? 0);
-  }
-  return diff === 0;
-}
+const RATE_LIMIT = 30;
+const WINDOW_SECONDS = 60;
 
 const uaSchema = z
   .enum([
@@ -87,7 +62,12 @@ async function run(
   userAgent?: z.infer<typeof uaSchema>,
 ): Promise<RedirectAnalysis[]> {
   const { traceUrl } = await import("@/lib/trace-engine.server");
-  return Promise.all(urls.map((url) => traceUrl(url, userAgent)));
+  const ua = userAgent ?? "desktop-chrome";
+  return Promise.all(
+    urls.map((url) =>
+      coalesceInFlight(`trace:${ua}:${url.trim()}`, () => traceUrl(url, userAgent)),
+    ),
+  );
 }
 
 const USAGE = {
@@ -107,6 +87,7 @@ const USAGE = {
   limits: {
     maxUrlsPerRequest: MAX_URLS,
     requestsPerMinute: RATE_LIMIT,
+    maxConcurrentPerIp: 4,
     maxHops: 20,
     perHopTimeoutSeconds: 15,
     overallTimeoutSeconds: 55,
@@ -122,11 +103,12 @@ const USAGE = {
   docs: "/api-docs",
 };
 
-async function handle(
-  request: Request,
-  urls: string[],
-  userAgent?: z.infer<typeof uaSchema>,
-) {
+async function handle(request: Request, urls: string[], userAgent?: z.infer<typeof uaSchema>) {
+  const waf = inspectIncomingRequest(request);
+  if (!waf.ok) {
+    return json({ error: waf.reason ?? "Blocked by WAF." }, waf.status);
+  }
+
   const configuredApiKey =
     typeof process !== "undefined" ? process.env["REDIRECT_TRACER_API_KEY"]?.trim() : undefined;
   const authHeader = request.headers.get("authorization");
@@ -144,22 +126,35 @@ async function handle(
     return json({ error: `A maximum of ${MAX_URLS} URLs per request is allowed.` }, 400);
   }
 
-  const ip =
-    request.headers.get("cf-connecting-ip") ??
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    "anonymous";
-  const limit = rateLimit(ip);
-  const headers = {
-    "x-ratelimit-limit": String(RATE_LIMIT),
+  const ip = extractClientIp(request);
+  const fp = extractClientFingerprint(request);
+  const limit = checkRateLimit(fp, "trace");
+  const headers: Record<string, string> = {
+    "x-ratelimit-limit": String(limit.limit),
     "x-ratelimit-remaining": String(limit.remaining),
-    "x-ratelimit-reset": String(Math.ceil(limit.reset / 1000)),
+    "x-ratelimit-reset": String(limit.resetEpochSeconds),
   };
   if (!limit.ok) {
+    headers["retry-after"] = String(limit.retryAfterSeconds);
     return json(
       {
-        error: "Rate limit exceeded. Try again shortly.",
+        error: limit.reason ?? "Rate limit exceeded. Try again shortly.",
         limit: RATE_LIMIT,
-        windowSeconds: WINDOW_MS / 1000,
+        windowSeconds: WINDOW_SECONDS,
+        retryAfterSeconds: limit.retryAfterSeconds,
+      },
+      429,
+      headers,
+    );
+  }
+
+  const slot = acquireConcurrencySlot(ip, "trace");
+  if (!slot.ok) {
+    headers["retry-after"] = "3";
+    return json(
+      {
+        error: slot.reason ?? "Too many simultaneous trace requests.",
+        retryAfterSeconds: 3,
       },
       429,
       headers,
@@ -171,6 +166,8 @@ async function handle(
     return json({ count: results.length, results }, 200, headers);
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Trace failed" }, 500, headers);
+  } finally {
+    slot.release();
   }
 }
 
@@ -205,4 +202,3 @@ export const Route = createFileRoute("/api/public/trace")({
     },
   },
 });
-

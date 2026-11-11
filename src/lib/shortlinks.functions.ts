@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { getRequestHost } from "@tanstack/react-start/server";
+import { getRequest, getRequestHost } from "@tanstack/react-start/server";
 import { z } from "zod";
 
 import { MAX_CONDITIONS, MAX_RULES, type LinkRule } from "./link-rules";
@@ -33,6 +33,32 @@ function randomSlug(): string {
   return Array.from(bytes, (b) => chars[b % chars.length]).join("");
 }
 
+async function withShortLinkWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
+  const { acquireConcurrencySlot, checkRateLimit, extractClientFingerprint, extractClientIp } =
+    await import("./security.server");
+  let req: Request | null = null;
+  try {
+    req = getRequest();
+  } catch {
+    req = null;
+  }
+  const fp = extractClientFingerprint(req);
+  const ip = extractClientIp(req);
+  const limit = checkRateLimit(fp, "shortlink-write");
+  if (!limit.ok) {
+    throw new Error(limit.reason ?? "Too many short link actions. Please wait a moment.");
+  }
+  const slot = acquireConcurrencySlot(ip, "shortlink-write");
+  if (!slot.ok) {
+    throw new Error(slot.reason ?? "Too many simultaneous short link operations.");
+  }
+  try {
+    return await fn();
+  } finally {
+    slot.release();
+  }
+}
+
 export const createShortLink = createServerFn({ method: "POST" })
   .inputValidator((d) =>
     z
@@ -43,32 +69,34 @@ export const createShortLink = createServerFn({ method: "POST" })
       })
       .parse(d),
   )
-  .handler(async ({ data }) => {
-    const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
-    const problem = await validateDestination(data.destination, getRequestHost());
-    if (problem) throw new Error(problem);
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
+      const problem = await validateDestination(data.destination, getRequestHost());
+      if (problem) throw new Error(problem);
 
-    const custom = data.slug || "";
-    if (custom && (!SLUG_RE.test(custom) || RESERVED.has(custom.toLowerCase()))) {
-      throw new Error("Slug must be 3–40 letters, numbers, - or _, and not a reserved word.");
-    }
-    const db = shortLinkDb();
-    for (let attempt = 0; attempt < (custom ? 1 : 4); attempt++) {
-      const slug = custom || randomSlug();
-      const { data: row, error } = await db.rpc("create_short_link", {
-        p_slug: slug,
-        p_destination: new URL(data.destination).toString(),
-        p_owner: data.owner,
-      });
-      if (!error) return row as ShortLink;
-      if (error.code === "23505") {
-        if (custom) throw new Error("That slug is already taken.");
-        continue;
+      const custom = data.slug || "";
+      if (custom && (!SLUG_RE.test(custom) || RESERVED.has(custom.toLowerCase()))) {
+        throw new Error("Slug must be 3–40 letters, numbers, - or _, and not a reserved word.");
       }
-      throw dbError(error.message);
-    }
-    throw new Error("Could not generate a unique slug. Try again.");
-  });
+      const db = shortLinkDb();
+      for (let attempt = 0; attempt < (custom ? 1 : 4); attempt++) {
+        const slug = custom || randomSlug();
+        const { data: row, error } = await db.rpc("create_short_link", {
+          p_slug: slug,
+          p_destination: new URL(data.destination).toString(),
+          p_owner: data.owner,
+        });
+        if (!error) return row as ShortLink;
+        if (error.code === "23505") {
+          if (custom) throw new Error("That slug is already taken.");
+          continue;
+        }
+        throw dbError(error.message);
+      }
+      throw new Error("Could not generate a unique slug. Try again.");
+    }),
+  );
 
 export const listShortLinks = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ owner }).parse(d))
@@ -83,28 +111,32 @@ export const listShortLinks = createServerFn({ method: "POST" })
 
 export const setShortLinkEnabled = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ id: z.string().uuid(), enabled: z.boolean(), owner }).parse(d))
-  .handler(async ({ data }) => {
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { error } = await shortLinkDb().rpc("set_short_link_enabled", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_enabled: data.enabled,
-    });
-    if (error) throw dbError(error.message);
-    return { ok: true };
-  });
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { error } = await shortLinkDb().rpc("set_short_link_enabled", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_enabled: data.enabled,
+      });
+      if (error) throw dbError(error.message);
+      return { ok: true };
+    }),
+  );
 
 export const deleteShortLink = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ id: z.string().uuid(), owner }).parse(d))
-  .handler(async ({ data }) => {
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { error } = await shortLinkDb().rpc("delete_short_link", {
-      p_id: data.id,
-      p_owner: data.owner,
-    });
-    if (error) throw dbError(error.message);
-    return { ok: true };
-  });
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { error } = await shortLinkDb().rpc("delete_short_link", {
+        p_id: data.id,
+        p_owner: data.owner,
+      });
+      if (error) throw dbError(error.message);
+      return { ok: true };
+    }),
+  );
 
 export const updateShortLinkDestination = createServerFn({ method: "POST" })
   .inputValidator((d) =>
@@ -112,19 +144,21 @@ export const updateShortLinkDestination = createServerFn({ method: "POST" })
       .object({ id: z.string().uuid(), destination: z.string().trim().min(1).max(2048), owner })
       .parse(d),
   )
-  .handler(async ({ data }) => {
-    const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
-    const problem = await validateDestination(data.destination, getRequestHost());
-    if (problem) throw new Error(problem);
-    const { data: ok, error } = await shortLinkDb().rpc("update_short_link_destination", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_destination: new URL(data.destination).toString(),
-    });
-    if (error) throw dbError(error.message);
-    if (!ok) throw new Error("Link not found.");
-    return { ok: true };
-  });
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
+      const problem = await validateDestination(data.destination, getRequestHost());
+      if (problem) throw new Error(problem);
+      const { data: ok, error } = await shortLinkDb().rpc("update_short_link_destination", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_destination: new URL(data.destination).toString(),
+      });
+      if (error) throw dbError(error.message);
+      if (!ok) throw new Error("Link not found.");
+      return { ok: true };
+    }),
+  );
 
 export const setShortLinkExpiry = createServerFn({ method: "POST" })
   .inputValidator((d) =>
@@ -136,20 +170,22 @@ export const setShortLinkExpiry = createServerFn({ method: "POST" })
       })
       .parse(d),
   )
-  .handler(async ({ data }) => {
-    if (data.expiresAt && new Date(data.expiresAt).getTime() <= Date.now()) {
-      throw new Error("Expiry must be in the future.");
-    }
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { data: ok, error } = await shortLinkDb().rpc("set_short_link_expiry", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_expires_at: data.expiresAt,
-    });
-    if (error) throw dbError(error.message);
-    if (!ok) throw new Error("Link not found.");
-    return { ok: true };
-  });
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      if (data.expiresAt && new Date(data.expiresAt).getTime() <= Date.now()) {
+        throw new Error("Expiry must be in the future.");
+      }
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { data: ok, error } = await shortLinkDb().rpc("set_short_link_expiry", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_expires_at: data.expiresAt,
+      });
+      if (error) throw dbError(error.message);
+      if (!ok) throw new Error("Link not found.");
+      return { ok: true };
+    }),
+  );
 
 const ruleSchema = z.object({
   id: z.string().regex(/^[a-z0-9]{1,16}$/),
@@ -161,8 +197,18 @@ const ruleSchema = z.object({
     .array(
       z.object({
         field: z.enum([
-          "country", "platform", "browser", "os", "query", "utm_source",
-          "utm_medium", "utm_campaign", "weekday", "hour", "date",
+          "country",
+          "platform",
+          "browser",
+          "os",
+          "query",
+          "utm_source",
+          "utm_medium",
+          "utm_campaign",
+          "weekday",
+          "hour",
+          "date",
+          "ab_split",
         ]),
         op: z.enum(["is", "is_not", "contains", "between", "before", "after", "exists"]),
         value: z.string().trim().max(200),
@@ -176,24 +222,26 @@ export const setShortLinkRules = createServerFn({ method: "POST" })
   .inputValidator((d) =>
     z.object({ id: z.string().uuid(), rules: z.array(ruleSchema).max(MAX_RULES), owner }).parse(d),
   )
-  .handler(async ({ data }) => {
-    const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
-    const host = getRequestHost();
-    const rules: LinkRule[] = [];
-    for (const r of data.rules) {
-      const problem = await validateDestination(r.destination, host);
-      if (problem) throw new Error(`Rule "${r.name || r.id}": ${problem}`);
-      rules.push({ ...r, destination: new URL(r.destination).toString() });
-    }
-    const { data: ok, error } = await shortLinkDb().rpc("set_short_link_rules", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_rules: rules as never,
-    });
-    if (error) throw dbError(error.message);
-    if (!ok) throw new Error("Link not found.");
-    return { ok: true };
-  });
+  .handler(async ({ data }) =>
+    withShortLinkWriteGuard(async () => {
+      const { shortLinkDb, validateDestination } = await import("./shortlinks.server");
+      const host = getRequestHost();
+      const rules: LinkRule[] = [];
+      for (const r of data.rules) {
+        const problem = await validateDestination(r.destination, host);
+        if (problem) throw new Error(`Rule "${r.name || r.id}": ${problem}`);
+        rules.push({ ...r, destination: new URL(r.destination).toString() });
+      }
+      const { data: ok, error } = await shortLinkDb().rpc("set_short_link_rules", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_rules: rules as never,
+      });
+      if (error) throw dbError(error.message);
+      if (!ok) throw new Error("Link not found.");
+      return { ok: true };
+    }),
+  );
 
 export interface Bucket {
   k: string;
@@ -259,3 +307,99 @@ export const exportLinkClicks = createServerFn({ method: "POST" })
     if (error) throw dbError(error.message);
     return (rows ?? []) as Record<string, string | boolean | null>[];
   });
+
+export interface DestinationHealthResult {
+  id: string;
+  url: string;
+  ok: boolean;
+  status: number | null;
+  statusText: string;
+  latencyMs: number;
+  finalUrl: string | null;
+  error: string | null;
+}
+
+export const checkShortLinksHealth = createServerFn({ method: "POST" })
+  .inputValidator((d) =>
+    z
+      .object({
+        owner,
+        items: z
+          .array(
+            z.object({
+              id: z.string().min(1).max(64),
+              url: z.string().trim().min(1).max(2048),
+            }),
+          )
+          .min(1)
+          .max(20),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data }): Promise<DestinationHealthResult[]> =>
+    withShortLinkWriteGuard(async () => {
+      const { assertSafeUrl } = await import("./trace-ssrf.server");
+      const results = await Promise.all(
+        data.items.map(async (item): Promise<DestinationHealthResult> => {
+          const started = performance.now();
+          const safety = await assertSafeUrl(item.url);
+          if (!safety.ok) {
+            return {
+              id: item.id,
+              url: item.url,
+              ok: false,
+              status: null,
+              statusText: "Blocked",
+              latencyMs: Math.round(performance.now() - started),
+              finalUrl: null,
+              error: safety.reason ?? "Blocked destination",
+            };
+          }
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 6000);
+          try {
+            const res = await fetch(item.url, {
+              method: "GET",
+              redirect: "follow",
+              signal: controller.signal,
+              headers: {
+                "user-agent":
+                  "Mozilla/5.0 (compatible; CROSX-LinkHealthCheck/1.0; +https://rca.crosx.in)",
+                accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              },
+            });
+            try {
+              await res.body?.cancel();
+            } catch {
+              // ignore
+            }
+            const latencyMs = Math.round(performance.now() - started);
+            return {
+              id: item.id,
+              url: item.url,
+              ok: res.status >= 200 && res.status < 400,
+              status: res.status,
+              statusText: res.statusText || (res.ok ? "OK" : `HTTP ${res.status}`),
+              latencyMs,
+              finalUrl: res.url || item.url,
+              error: res.status >= 400 ? `HTTP ${res.status}` : null,
+            };
+          } catch (err) {
+            return {
+              id: item.id,
+              url: item.url,
+              ok: false,
+              status: null,
+              statusText: "Unreachable",
+              latencyMs: Math.round(performance.now() - started),
+              finalUrl: null,
+              error: err instanceof Error ? err.message : "Connection failed",
+            };
+          } finally {
+            clearTimeout(timer);
+          }
+        }),
+      );
+      return results;
+    }),
+  );

@@ -1,17 +1,91 @@
-import { Radar, RotateCcw, ServerCrash, Sparkles } from "lucide-react";
+import {
+  CheckCircle2,
+  Globe,
+  Radar,
+  RotateCcw,
+  SearchCheck,
+  ServerCrash,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import type { CSSProperties } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 
-export function LoadingState() {
+const SEO_AUDIT_LOADING_ROWS = [
+  "Final HTTP status & protocol security",
+  "HSTS (Strict-Transport-Security) policy",
+  "Canonical URL & self-referencing alignment",
+  "Meta robots & X-Robots-Tag directives",
+  "Tracking parameter diff & clean URL extraction",
+] as const;
+
+export function LoadingState({
+  urls,
+  userAgentLabel,
+}: {
+  urls?: string[];
+  userAgentLabel?: string;
+} = {}) {
+  const primaryUrl = urls?.[0];
+  const extraCount = urls && urls.length > 1 ? urls.length - 1 : 0;
+
   return (
-    <section className="panel animate-reveal space-y-4 overflow-hidden p-4 sm:p-6">
-      <div className="flex items-center gap-2.5 text-sm font-medium text-muted-foreground">
-        <span className="animate-pulse-ring grid size-7 place-items-center rounded-full bg-brand/12">
-          <Radar className="size-4 animate-spin text-brand" />
-        </span>
-        Following the redirect chain…
+    <section
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Analyzing redirect chain and SEO signals"
+      className="panel animate-reveal relative space-y-5 overflow-hidden p-4 sm:p-6"
+    >
+      {/* Top shimmer progress bar */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-1 overflow-hidden bg-brand/15">
+        <div className="animate-shimmer h-full w-full bg-brand/40" />
       </div>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="animate-pulse-ring grid size-8 shrink-0 place-items-center rounded-full bg-brand/12">
+            <Radar className="size-4 animate-spin text-brand" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-foreground">
+              Tracing redirect hops &amp; auditing SEO signals…
+            </p>
+            <p className="truncate font-mono text-xs text-muted-foreground">
+              {primaryUrl
+                ? `${primaryUrl}${extraCount > 0 ? ` (+${extraCount} more)` : ""}`
+                : "Following server-side HTTP, meta-refresh & JavaScript hops"}
+            </p>
+          </div>
+        </div>
+        {userAgentLabel ? (
+          <span className="animate-shimmer inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border border-hairline bg-surface-muted px-3 py-1 font-mono text-[11px] font-medium text-muted-foreground">
+            <Globe className="size-3 text-brand" />
+            {userAgentLabel}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Active pipeline stages with animate-shimmer */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {[
+          { icon: Radar, label: "1. Resolving HTTP & JS hops" },
+          { icon: SearchCheck, label: "2. Auditing canonical & robots SEO" },
+          { icon: ShieldCheck, label: "3. Inspecting HSTS & UTM parameters" },
+        ].map(({ icon: Icon, label }, idx) => (
+          <div
+            key={label}
+            className="animate-shimmer flex items-center gap-2 rounded-xl border border-hairline bg-surface-muted/80 px-3 py-2 text-xs font-medium text-foreground"
+            style={{ "--stagger": idx } as CSSProperties}
+          >
+            <Icon className="size-3.5 shrink-0 text-brand" />
+            <span className="truncate">{label}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Summary metric cards shimmer */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <div
@@ -19,20 +93,50 @@ export function LoadingState() {
             className="animate-rise stagger-fast relative overflow-hidden rounded-xl border border-hairline bg-surface-muted p-4"
             style={{ "--stagger": i } as CSSProperties}
           >
-            <Skeleton className="h-3 w-20 rounded-full" />
-            <Skeleton className="mt-3 h-6 w-14 rounded-md" />
-            <span className="animate-shimmer absolute inset-0" />
+            <Skeleton className="h-3 w-24 rounded-full" />
+            <Skeleton className="mt-3 h-6 w-16 rounded-md" />
+            <span className="animate-shimmer pointer-events-none absolute inset-0" />
           </div>
         ))}
       </div>
+
+      {/* SEO Signals Audit Shimmer Panel */}
+      <div className="relative overflow-hidden rounded-xl border border-hairline bg-surface-muted/60 p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            <CheckCircle2 className="size-3.5 text-brand" />
+            SEO Signals &amp; Indexability Audit
+          </span>
+          <Skeleton className="h-4 w-24 rounded-full" />
+        </div>
+        <div className="divide-y divide-hairline">
+          {SEO_AUDIT_LOADING_ROWS.map((rowLabel, i) => (
+            <div
+              key={rowLabel}
+              className="flex items-center justify-between gap-4 py-2.5 first:pt-1 last:pb-1"
+            >
+              <span className="text-xs text-muted-foreground">{rowLabel}</span>
+              <Skeleton className="h-4 w-28 rounded-md sm:w-40" />
+            </div>
+          ))}
+        </div>
+        <span className="animate-shimmer pointer-events-none absolute inset-0" />
+      </div>
+
+      {/* Hop cards shimmer */}
       <div className="space-y-3">
-        {Array.from({ length: 3 }).map((_, i) => (
+        {Array.from({ length: 2 }).map((_, i) => (
           <div
             key={i}
-            className="animate-rise stagger relative h-28 overflow-hidden rounded-xl border border-hairline bg-surface-muted"
+            className="animate-rise stagger relative h-24 overflow-hidden rounded-xl border border-hairline bg-surface-muted p-4"
             style={{ "--stagger": i } as CSSProperties}
           >
-            <span className="animate-shimmer absolute inset-0" />
+            <div className="flex items-center justify-between gap-3">
+              <Skeleton className="h-5 w-20 rounded-full" />
+              <Skeleton className="h-4 w-16 rounded-md" />
+            </div>
+            <Skeleton className="mt-3 h-4 w-3/4 rounded-md" />
+            <span className="animate-shimmer pointer-events-none absolute inset-0" />
           </div>
         ))}
       </div>

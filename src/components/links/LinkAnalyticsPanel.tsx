@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Bot, Download, Loader2, MousePointerClick, Users } from "lucide-react";
+import { Bot, Download, Loader2, MousePointerClick, Shuffle, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import type { LinkRule } from "@/lib/link-rules";
 import { exportLinkClicks, getLinkAnalytics, type Bucket } from "@/lib/shortlinks.functions";
 
 const RANGES = [
@@ -48,10 +49,12 @@ export function LinkAnalyticsPanel({
   id,
   slug,
   owner,
+  rules = [],
 }: {
   id: string;
   slug: string;
   owner: string;
+  rules?: LinkRule[];
 }) {
   const [days, setDays] = useState<number>(30);
   const get = useServerFn(getLinkAnalytics);
@@ -61,6 +64,14 @@ export function LinkAnalyticsPanel({
     const from = new Date(to.getTime() - days * 86_400_000);
     return { from: from.toISOString(), to: to.toISOString() };
   }, [days]);
+
+  const ruleNameMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rules) {
+      m.set(r.id, r.name || `Rule #${r.id}`);
+    }
+    return m;
+  }, [rules]);
 
   const q = useQuery({
     queryKey: ["link-analytics", id, days],
@@ -90,6 +101,20 @@ export function LinkAnalyticsPanel({
 
   const d = q.data;
   const max = Math.max(1, ...(d?.timeline.map((t) => t.clicks) ?? [1]));
+
+  const ruleBuckets = useMemo<Bucket[]>(() => {
+    if (!d?.recent) return [];
+    const counts = new Map<string, number>();
+    for (const r of d.recent) {
+      const label = r.rule_id
+        ? (ruleNameMap.get(r.rule_id) ?? `Rule ${r.rule_id}`)
+        : "Default destination";
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([k, n]) => ({ k, n }))
+      .sort((a, b) => b.n - a.n);
+  }, [d?.recent, ruleNameMap]);
 
   return (
     <div className="animate-reveal space-y-3 rounded-xl border border-hairline bg-surface-muted/40 p-3 sm:p-4">
@@ -170,6 +195,31 @@ export function LinkAnalyticsPanel({
             <BucketList title="UTM source / medium / campaign" items={d.utm} total={d.total} />
           </div>
 
+          {rules.length > 0 ? (
+            <div className="rounded-xl border border-hairline bg-surface/60 p-3">
+              <p className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
+                <Shuffle className="size-3 text-brand" />
+                Smart Rule &amp; A/B Split Variant Distribution (Recent Clicks)
+              </p>
+              {ruleBuckets.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No rule-matched clicks recorded yet.
+                </p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {ruleBuckets.map((b) => (
+                    <li key={b.k} className="text-xs">
+                      <div className="flex justify-between gap-2">
+                        <span className="truncate font-mono text-foreground">{b.k}</span>
+                        <span className="tabular-nums text-muted-foreground">{b.n}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+
           <div className="rounded-xl border border-hairline bg-surface/60 p-3">
             <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
               Recent activity
@@ -188,7 +238,7 @@ export function LinkAnalyticsPanel({
                         .filter(Boolean)
                         .join(" · ")}
                       {r.is_bot ? " · bot" : ""}
-                      {r.rule_id ? " · rule" : ""}
+                      {r.rule_id ? ` · ${ruleNameMap.get(r.rule_id) ?? `rule:${r.rule_id}`}` : ""}
                     </span>
                   </li>
                 ))}

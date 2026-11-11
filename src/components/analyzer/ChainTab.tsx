@@ -2,9 +2,13 @@ import {
   ChevronRight,
   Clock,
   CodeXml,
+  Cookie,
   CornerDownRight,
+  Eye,
+  FileCode2,
   Flag,
   Globe,
+  KeyRound,
   Lock,
   MapPin,
   MonitorPlay,
@@ -18,7 +22,7 @@ import type { CSSProperties } from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { SLOW_HOP_MS, isRedirect } from "@/lib/redirect-analysis";
-import type { HopMechanism, RedirectAnalysis } from "@/lib/redirect-types";
+import type { HopMechanism, RedirectAnalysis, RedirectHop } from "@/lib/redirect-types";
 import { CopyButton } from "./CopyButton";
 import { StatusBadge, statusTone } from "./StatusBadge";
 import { IssueList } from "./IssueList";
@@ -26,7 +30,10 @@ import { IssueList } from "./IssueList";
 function mechanismTone(mechanism: HopMechanism | undefined): string {
   switch (mechanism) {
     case "javascript-redirect":
+    case "form-redirect":
       return "border-info/30 bg-info/10 text-info";
+    case "gateway-unwrap":
+      return "border-brand/35 bg-brand/10 text-brand";
     case "meta-refresh":
       return "border-warning/35 bg-warning/10 text-warning-foreground";
     case "browser-navigation":
@@ -47,6 +54,10 @@ function mechanismIcon(mechanism: HopMechanism | undefined) {
   switch (mechanism) {
     case "javascript-redirect":
       return <CodeXml className={className} />;
+    case "form-redirect":
+      return <FileCode2 className={className} />;
+    case "gateway-unwrap":
+      return <KeyRound className={className} />;
     case "meta-refresh":
       return <RefreshCw className={className} />;
     case "browser-navigation":
@@ -138,10 +149,62 @@ function Meta({
   );
 }
 
+function LatencyWaterfall({ result }: { result: RedirectAnalysis }) {
+  const total = Math.max(1, result.totalResponseTimeMs);
+  if (result.hops.length <= 1 || result.totalResponseTimeMs <= 0) return null;
+
+  let cumulative = 0;
+  return (
+    <div className="panel space-y-2.5 p-3.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold text-foreground">Latency Waterfall Timeline</span>
+        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+          Total: {result.totalResponseTimeMs} ms across {result.hops.length} hops
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        {result.hops.map((hop) => {
+          const startPct = Math.min(96, Math.round((cumulative / total) * 100));
+          const widthPct = Math.max(
+            4,
+            Math.min(100 - startPct, Math.round((hop.responseTimeMs / total) * 100)),
+          );
+          cumulative += hop.responseTimeMs;
+          const slow = hop.responseTimeMs > SLOW_HOP_MS;
+          return (
+            <div key={hop.index} className="grid grid-cols-12 items-center gap-2 text-[11px]">
+              <span className="col-span-3 truncate font-mono text-muted-foreground sm:col-span-2">
+                Hop {hop.index + 1} ({hop.status || "—"})
+              </span>
+              <div className="relative col-span-6 h-2 overflow-hidden rounded-full bg-surface-muted sm:col-span-8">
+                <div
+                  className={cn(
+                    "absolute top-0 h-full rounded-full",
+                    slow
+                      ? "bg-warning"
+                      : hop.status >= 300 && hop.status < 400
+                        ? "bg-brand"
+                        : "bg-success",
+                  )}
+                  style={{ left: `${startPct}%`, width: `${widthPct}%` }}
+                />
+              </div>
+              <span className="col-span-3 text-right font-mono tabular-nums text-foreground sm:col-span-2">
+                {hop.responseTimeMs} ms
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ChainTab({ result }: { result: RedirectAnalysis }) {
   return (
     <div className="space-y-5">
       <FlowStrip result={result} />
+      <LatencyWaterfall result={result} />
 
       <ol className="relative space-y-3 pl-7 sm:pl-9">
         {/* connecting rail */}
@@ -233,13 +296,22 @@ export function ChainTab({ result }: { result: RedirectAnalysis }) {
                         style={{
                           width: `${Math.min(
                             100,
-                            Math.max(4, Math.round((hop.responseTimeMs / Math.max(1, result.totalResponseTimeMs)) * 100)),
+                            Math.max(
+                              4,
+                              Math.round(
+                                (hop.responseTimeMs / Math.max(1, result.totalResponseTimeMs)) *
+                                  100,
+                              ),
+                            ),
                           )}%`,
                         }}
                       />
                     </div>
                     <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-                      {Math.round((hop.responseTimeMs / Math.max(1, result.totalResponseTimeMs)) * 100)}% of total latency
+                      {Math.round(
+                        (hop.responseTimeMs / Math.max(1, result.totalResponseTimeMs)) * 100,
+                      )}
+                      % of total latency
                     </span>
                   </div>
                 ) : null}
@@ -277,6 +349,8 @@ export function ChainTab({ result }: { result: RedirectAnalysis }) {
                     <span className="min-w-0">{hop.blockedReason}</span>
                   </p>
                 ) : null}
+
+                <HopForensicsPanel hop={hop} />
               </div>
             </li>
           );
@@ -287,6 +361,135 @@ export function ChainTab({ result }: { result: RedirectAnalysis }) {
         <h3 className="mb-2 text-sm font-semibold text-foreground">Detected findings</h3>
         <IssueList issues={result.issues} />
       </div>
+    </div>
+  );
+}
+
+function HopForensicsPanel({ hop }: { hop: RedirectHop }) {
+  const f = hop.forensics;
+  if (!f) return null;
+
+  const hasSteps = Boolean(f.deobfuscationSteps && f.deobfuscationSteps.length > 0);
+  const hasCookiesSet = Boolean(f.cookiesSet && f.cookiesSet.length > 0);
+  const hasCookiesSent = Boolean(f.cookiesSent && f.cookiesSent.length > 0);
+  const hasReferer = Boolean(f.refererSent);
+  const hasEmbedded = Boolean(f.embeddedTargets && f.embeddedTargets.length > 0);
+  const hasArtifacts = Boolean(f.hiddenArtifacts && f.hiddenArtifacts.length > 0);
+
+  if (
+    !hasSteps &&
+    !hasCookiesSet &&
+    !hasCookiesSent &&
+    !hasReferer &&
+    !hasEmbedded &&
+    !hasArtifacts
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 space-y-2.5 rounded-xl border border-hairline bg-surface-muted/60 p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-foreground">
+          <Eye className="size-3.5 text-brand" />
+          Deep Hop Forensics &amp; De-Obfuscation
+        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {hasCookiesSet ? (
+            <span className="inline-flex items-center gap-1 rounded-md border border-hairline bg-background px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+              <Cookie className="size-3 text-brand" />
+              Set-Cookie ({f.cookiesSet!.length})
+            </span>
+          ) : null}
+          {hasCookiesSent ? (
+            <span className="inline-flex items-center gap-1 rounded-md border border-hairline bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+              Cookie Jar → {f.cookiesSent!.join(", ")}
+            </span>
+          ) : null}
+          {hasReferer ? (
+            <span
+              className="max-w-[240px] truncate rounded-md border border-hairline bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+              title={`Referer: ${f.refererSent}`}
+            >
+              Referer: {f.refererSent}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {hasSteps ? (
+        <div className="space-y-1 rounded-lg border border-brand/25 bg-brand/5 px-2.5 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-brand">
+            De-Obfuscation &amp; Unwrap Trail
+          </p>
+          <ul className="list-disc space-y-0.5 pl-4 font-mono text-[11px] text-foreground">
+            {f.deobfuscationSteps!.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {hasEmbedded ? (
+        <div className="space-y-1 rounded-lg border border-hairline bg-background px-2.5 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Embedded / Encoded Target URL(s) in Request
+          </p>
+          <div className="space-y-1">
+            {f.embeddedTargets!.map((t) => (
+              <div key={`${t.source}-${t.url}`} className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="mr-1.5 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand">
+                    {t.source}
+                  </span>
+                  <span className="break-all font-mono text-[11px] text-foreground">{t.url}</span>
+                </div>
+                <CopyButton value={t.url} label="Copy unwrapped target URL" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {hasCookiesSet ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {f.cookiesSet!.map((c) => (
+            <span
+              key={c.name}
+              className="inline-flex items-center gap-1 rounded-md border border-hairline bg-background px-2 py-0.5 font-mono text-[10.5px] text-foreground"
+            >
+              <strong className="font-semibold text-brand">{c.name}</strong>={c.valuePreview}
+              {c.flags.length > 0 ? (
+                <span className="text-[9.5px] text-muted-foreground">({c.flags.join(", ")})</span>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {hasArtifacts ? (
+        <div className="space-y-1 rounded-lg border border-hairline bg-background px-2.5 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Discovered Hidden Page Links &amp; Artifacts ({f.hiddenArtifacts!.length})
+          </p>
+          <div className="space-y-1">
+            {f.hiddenArtifacts!.slice(0, 5).map((art) => (
+              <div
+                key={`${art.kind}-${art.url}`}
+                className="flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0 truncate">
+                  <span className="mr-1.5 rounded bg-surface-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                    {art.label}
+                  </span>
+                  <span className="font-mono text-[11px] text-foreground">{art.url}</span>
+                </div>
+                <CopyButton value={art.url} label="Copy artifact URL" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

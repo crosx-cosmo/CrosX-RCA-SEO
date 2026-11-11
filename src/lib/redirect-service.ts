@@ -9,9 +9,13 @@
  *  2. The built-in server function, which performs the real HTTP requests.
  *  3. Demo mode (explicit user action only) for previewing the UI with no API.
  */
-import { analyzeRedirectChain, analyzeRedirectChains } from "./redirect.functions";
+import {
+  analyzeRedirectChain,
+  analyzeRedirectChains,
+  compareRedirectAgents,
+} from "./redirect.functions";
 import { buildDemoAnalysis } from "./redirect-demo";
-import { normalizeUrl } from "./redirect-analysis";
+import { normalizeUrl, USER_AGENT_PRESETS } from "./redirect-analysis";
 import { saveAnalyses, type ShareIdMap } from "./analysis-store";
 import type { RedirectAnalysis, UserAgentPreset } from "./redirect-types";
 
@@ -63,7 +67,32 @@ export async function analyzeUrls(
   return { results, shareIds };
 }
 
+export async function compareUrlAcrossAgents(
+  rawUrl: string,
+  isDemo = false,
+): Promise<RedirectAnalysis[]> {
+  const url = normalizeUrl(rawUrl);
+  if (!url) throw new Error("Enter a URL to compare.");
+
+  if (isDemo) {
+    const base = buildDemoAnalysis(url);
+    const profiles: UserAgentPreset[] = ["desktop-chrome", "mobile-iphone", "googlebot-smartphone"];
+    return profiles.map((preset) => ({
+      ...base,
+      userAgentPreset: preset,
+      userAgentLabel: USER_AGENT_PRESETS[preset].label,
+      totalResponseTimeMs:
+        preset === "googlebot-smartphone"
+          ? Math.max(120, base.totalResponseTimeMs - 140)
+          : preset === "mobile-iphone"
+            ? base.totalResponseTimeMs + 85
+            : base.totalResponseTimeMs,
+    }));
+  }
+
+  return compareRedirectAgents({ data: { url } });
+}
+
 export function demoAnalysis(): RedirectAnalysis[] {
   return [buildDemoAnalysis("http://demo-offer.example/go?click_id=abc123&aff_id=5541")];
 }
-

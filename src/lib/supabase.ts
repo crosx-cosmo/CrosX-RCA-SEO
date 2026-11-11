@@ -4,10 +4,20 @@
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+export const SUPABASE_PROJECT_ID =
+  (import.meta.env?.["VITE_SUPABASE_PROJECT_ID"] as string | undefined)?.trim() ||
+  (typeof process !== "undefined" ? process.env["SUPABASE_PROJECT_ID"]?.trim() : undefined) ||
+  "";
+
 export const SUPABASE_URL =
   (import.meta.env?.["VITE_SUPABASE_URL"] as string | undefined)?.trim() ||
   (typeof process !== "undefined" ? process.env["SUPABASE_URL"]?.trim() : undefined) ||
-  "";
+  (SUPABASE_PROJECT_ID ? `https://${SUPABASE_PROJECT_ID}.supabase.co` : "");
+
+export const SUPABASE_DIRECT_URL = SUPABASE_PROJECT_ID
+  ? `https://${SUPABASE_PROJECT_ID}.supabase.co`
+  : "";
+
 export const SUPABASE_PUBLISHABLE_KEY =
   (import.meta.env?.["VITE_SUPABASE_PUBLISHABLE_KEY"] as string | undefined)?.trim() ||
   (typeof process !== "undefined" ? process.env["SUPABASE_PUBLISHABLE_KEY"]?.trim() : undefined) ||
@@ -59,4 +69,3 @@ export const supabase = new Proxy({} as SupabaseClient, {
     return typeof val === "function" ? val.bind(client) : val;
   },
 });
-

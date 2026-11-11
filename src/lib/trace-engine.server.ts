@@ -3,16 +3,20 @@
  *
  * Traces a URL through every redirect mechanism it can safely follow:
  *  - HTTP 301/302/303/307/308 (and any 3xx with a Location header)
- *  - HTTP `Refresh` response header
+ *  - Extended redirect headers (Refresh, HX-Redirect, X-Redirect, X-Redirect-To)
  *  - HTML meta refresh
- *  - JavaScript location navigation found in the returned document
+ *  - Direct & de-obfuscated JavaScript location navigation (Base64, Hex, Unicode,
+ *    String.fromCharCode, variable indirection, reversed strings, setTimeout)
+ *  - Auto-submitted HTML <form action="..."> redirects
+ *  - Next.js / SPA hydration state & thin interstitial anchors
+ *  - Nested query-parameter & link-shim gateway unwrapping (Base64, Hex, URL-encoded,
+ *    Proofpoint v3, SafeLinks, Facebook/Google/YouTube/AMP wrappers)
  *  - Computed/dynamic navigation, via an isolated headless-browser fallback
  *
- * Guarantees:
- *  - every destination passes the SSRF guard before a request is made
- *  - hard caps on hops, per-hop time and total analysis time
- *  - loops and dead ends are detected and reported
- *  - when a hop cannot be followed, the exact reason is attached to it
+ * Stateful across hops:
+ *  - Maintains an in-memory per-trace Cookie Jar (Set-Cookie -> Cookie)
+ *  - Propagates Referer headers across hops (respecting Referrer-Policy)
+ *  - Records deep forensic telemetry on every hop
  */
 import {
   assemble,
@@ -25,6 +29,7 @@ import {
 } from "./redirect-analysis";
 import {
   detectClientRedirect,
+  extractEmbeddedTargets,
   extractPageMeta,
   looksLikeRedirector,
   parseRefreshValue,
@@ -32,6 +37,8 @@ import {
 import { assertSafeUrl } from "./trace-ssrf.server";
 import { browserFallbackConfigured, traceWithBrowser } from "./trace-browser.server";
 import type {
+  HopCookieInfo,
+  HopForensics,
   HopMechanism,
   RedirectAnalysis,
   RedirectHop,
@@ -47,12 +54,166 @@ export const MECHANISM_LABEL: Record<HopMechanism, string> = {
   "http-redirect": "HTTP Redirect",
   "javascript-redirect": "JavaScript Redirect",
   "meta-refresh": "Meta Refresh",
+  "form-redirect": "Form Auto-Submit",
+  "gateway-unwrap": "Gateway Unwrap",
   "browser-navigation": "Browser Navigation",
   "final-response": "Final Response",
   blocked: "Blocked",
   unresolved: "Not Followed",
   error: "Request Failed",
 };
+
+interface StoredCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  secure: boolean;
+  httpOnly: boolean;
+  sameSite: string | null;
+}
+
+/** Lightweight per-trace cookie jar so multi-hop affiliate & auth trackers don't drop sessions. */
+export class TraceCookieJar {
+  private store = new Map<string, StoredCookie>();
+
+  ingestSetCookieHeaders(rawCookies: string[], requestUrl: string): HopCookieInfo[] {
+    const recorded: HopCookieInfo[] = [];
+    let reqUrl: URL;
+    try {
+      reqUrl = new URL(requestUrl);
+    } catch {
+      return recorded;
+    }
+
+    for (const raw of rawCookies) {
+      const parts = raw
+        .split(";")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      if (parts.length === 0) continue;
+      const first = parts[0]!;
+      const eqIdx = first.indexOf("=");
+      if (eqIdx <= 0) continue;
+
+      const name = first.slice(0, eqIdx).trim();
+      const value = first.slice(eqIdx + 1).trim();
+      if (!name) continue;
+
+      let domain = reqUrl.hostname.toLowerCase();
+      let path = "/";
+      let secure = false;
+      let httpOnly = false;
+      let sameSite: string | null = null;
+      const flags: string[] = [];
+
+      for (const attr of parts.slice(1)) {
+        const [kRaw, vRaw] = attr.split("=");
+        const k = (kRaw ?? "").trim().toLowerCase();
+        const v = (vRaw ?? "").trim();
+        if (k === "domain" && v) {
+          domain = v.replace(/^\.+/, "").toLowerCase();
+          flags.push(`Domain=${domain}`);
+        } else if (k === "path" && v) {
+          path = v;
+        } else if (k === "secure") {
+          secure = true;
+          flags.push("Secure");
+        } else if (k === "httponly") {
+          httpOnly = true;
+          flags.push("HttpOnly");
+        } else if (k === "samesite" && v) {
+          sameSite = v;
+          flags.push(`SameSite=${v}`);
+        }
+      }
+
+      // Security check: only allow setting cookie for same host or parent domain
+      const reqHost = reqUrl.hostname.toLowerCase();
+      if (reqHost === domain || reqHost.endsWith(`.${domain}`)) {
+        this.store.set(`${domain}|${path}|${name}`, {
+          name,
+          value,
+          domain,
+          path,
+          secure,
+          httpOnly,
+          sameSite,
+        });
+      }
+
+      const preview = value.length > 24 ? `${value.slice(0, 21)}…` : value;
+      recorded.push({ name, valuePreview: preview, flags });
+    }
+
+    return recorded;
+  }
+
+  getCookiesFor(requestUrl: string): { headerValue: string | null; names: string[] } {
+    let reqUrl: URL;
+    try {
+      reqUrl = new URL(requestUrl);
+    } catch {
+      return { headerValue: null, names: [] };
+    }
+
+    const reqHost = reqUrl.hostname.toLowerCase();
+    const isHttps = reqUrl.protocol === "https:";
+    const pairs: string[] = [];
+    const names: string[] = [];
+
+    for (const cookie of this.store.values()) {
+      if (cookie.secure && !isHttps) continue;
+      const domainMatch = reqHost === cookie.domain || reqHost.endsWith(`.${cookie.domain}`);
+      if (!domainMatch) continue;
+      if (!reqUrl.pathname.startsWith(cookie.path)) continue;
+      pairs.push(`${cookie.name}=${cookie.value}`);
+      names.push(cookie.name);
+    }
+
+    return {
+      headerValue: pairs.length > 0 ? pairs.join("; ") : null,
+      names,
+    };
+  }
+}
+
+function extractRawSetCookies(headers: Headers): string[] {
+  const anyHeaders = headers as unknown as { getSetCookie?: () => string[] };
+  if (typeof anyHeaders.getSetCookie === "function") {
+    const list = anyHeaders.getSetCookie();
+    if (Array.isArray(list) && list.length > 0) return list;
+  }
+  const single = headers.get("set-cookie");
+  if (!single) return [];
+  // Split multiple Set-Cookie values while avoiding commas inside Expires=Wed, 21 Oct...
+  return single.split(/,(?=\s*[A-Za-z0-9_-]+\s*=)/g).map((s) => s.trim());
+}
+
+function isLikelyGatewayOrWrapperUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    if (
+      /(?:facebook\.com|google\.|youtube\.com|safelinks\.protection\.outlook\.com|urldefense\.|t\.umblr\.com|vk\.com|steamcommunity\.com|out\.reddit\.com|l\.instagram\.com|away\.vk\.com|duckduckgo\.com|r\.search\.yahoo\.com|redirect\.|go\.|trk\.|click\.|links?\.)/i.test(
+        host,
+      )
+    ) {
+      return true;
+    }
+    if (
+      /^\/(?:l\.php|url|redirect|out|go|r|exit|leave|click|track|away|external|jump| visit|link|v3\/__)/i.test(
+        path,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 function headersToObject(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
@@ -80,6 +241,26 @@ function resolveAgainst(base: string, target: string): string | null {
   }
 }
 
+function computeNextReferer(
+  fromUrl: string,
+  toUrl: string,
+  referrerPolicyHeader: string | null,
+): string | null {
+  const policy = (referrerPolicyHeader ?? "").toLowerCase();
+  if (policy.includes("no-referrer") && !policy.includes("downgrade")) return null;
+  try {
+    const from = new URL(fromUrl);
+    const to = new URL(toUrl);
+    // Never send HTTPS referer over plain HTTP downgrade
+    if (from.protocol === "https:" && to.protocol === "http:") return null;
+    if (policy.includes("same-origin") && from.origin !== to.origin) return null;
+    if (policy.includes("origin")) return `${from.origin}/`;
+    return from.toString();
+  } catch {
+    return null;
+  }
+}
+
 interface HopDraft extends RedirectHop {
   mechanism: HopMechanism;
   mechanismLabel: string;
@@ -88,6 +269,7 @@ interface HopDraft extends RedirectHop {
   nextUrl: string | null;
   blockedReason: string | null;
   addresses: string[];
+  forensics?: HopForensics;
 }
 
 function makeHop(
@@ -114,6 +296,7 @@ function makeHop(
     nextUrl: partial.nextUrl ?? null,
     blockedReason: partial.blockedReason ?? null,
     addresses: partial.addresses ?? [],
+    forensics: partial.forensics,
   };
 }
 
@@ -126,8 +309,10 @@ export async function traceUrl(
   const deadline = Date.now() + OVERALL_TIMEOUT_MS;
   const hops: HopDraft[] = [];
   const seen = new Set<string>();
+  const cookieJar = new TraceCookieJar();
 
   let current = startUrl;
+  let pendingReferer: string | null = null;
   let redirectLoop = false;
   let truncated = false;
   let error: string | null = null;
@@ -136,7 +321,7 @@ export async function traceUrl(
   let finalDestinationConfirmed = true;
   let browserFallbackUsed = false;
   let browserFallbackNote: string | null = null;
-  let page: { canonical: string | null; metaRobots: string | null } = {
+  let page: import("./redirect-analysis").PageMetaInput = {
     canonical: null,
     metaRobots: null,
   };
@@ -180,6 +365,9 @@ export async function traceUrl(
     }
     seen.add(key);
 
+    // Pre-scan the current hop URL for nested/encoded target URLs
+    const embeddedTargets = extractEmbeddedTargets(current);
+
     // --- Safety gate: every destination is validated before it is requested.
     const verdict = await assertSafeUrl(current, Math.min(5000, remaining));
     if (!verdict.ok) {
@@ -191,6 +379,7 @@ export async function traceUrl(
           blockedReason: verdict.reason,
           mechanismDetail: verdict.reason,
           redirectType: "Blocked destination",
+          forensics: embeddedTargets.length > 0 ? { embeddedTargets } : undefined,
         }),
       );
       terminationReason = "blocked";
@@ -201,16 +390,29 @@ export async function traceUrl(
 
     const hopTimeout = Math.min(PER_HOP_TIMEOUT_MS, deadline - Date.now());
     const started = Date.now();
+    const { headerValue: cookieHeader, names: cookiesSent } = cookieJar.getCookiesFor(current);
+    const refererSent = pendingReferer;
+
+    const reqHeaders: Record<string, string> = {
+      "user-agent": preset.ua,
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "accept-language": "en-US,en;q=0.9",
+      "upgrade-insecure-requests": "1",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": refererSent ? "cross-site" : "none",
+      "sec-fetch-user": "?1",
+    };
+    if (cookieHeader) reqHeaders["cookie"] = cookieHeader;
+    if (refererSent) reqHeaders["referer"] = refererSent;
+
     let response: Response;
     try {
       response = await fetch(current, {
         method: "GET",
         redirect: "manual",
-        headers: {
-          "user-agent": preset.ua,
-          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "accept-language": "en-US,en;q=0.9",
-        },
+        headers: reqHeaders,
         signal: AbortSignal.timeout(Math.max(1000, hopTimeout)),
       });
     } catch (e) {
@@ -220,6 +422,43 @@ export async function traceUrl(
           : e instanceof Error
             ? e.message
             : "Request failed.";
+
+      // If this hop failed at network level BUT carries an embedded target URL in its query/path,
+      // unwrap the embedded target so secret/gateway links are still traced to their destination!
+      const fallbackEmbedded = embeddedTargets[0];
+      if (fallbackEmbedded) {
+        const resolved = resolveAgainst(current, fallbackEmbedded.url);
+        if (resolved && !seen.has(canonicalKey(resolved))) {
+          hops.push(
+            makeHop({
+              index: i,
+              url: current,
+              mechanism: "gateway-unwrap",
+              responseTimeMs: Date.now() - started,
+              redirectType: "Gateway Unwrap",
+              location: fallbackEmbedded.url,
+              resolvedLocation: resolved,
+              nextUrl: resolved,
+              mechanismDetail: `Gateway unreachable (${message}); unwrapped ${fallbackEmbedded.source}`,
+              evidence: `${fallbackEmbedded.source} → ${fallbackEmbedded.url}`,
+              addresses: verdict.addresses,
+              forensics: {
+                embeddedTargets,
+                cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+                refererSent,
+                deobfuscationSteps: [
+                  `Gateway request failed (${message})`,
+                  `Unwrapped embedded destination from ${fallbackEmbedded.source} (${fallbackEmbedded.encoding})`,
+                ],
+              },
+            }),
+          );
+          pendingReferer = computeNextReferer(current, resolved, null);
+          current = resolved;
+          continue;
+        }
+      }
+
       hops.push(
         makeHop({
           index: i,
@@ -230,6 +469,11 @@ export async function traceUrl(
           mechanismDetail: message,
           redirectType: "Request failed",
           addresses: verdict.addresses,
+          forensics: {
+            embeddedTargets: embeddedTargets.length > 0 ? embeddedTargets : undefined,
+            cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+            refererSent,
+          },
         }),
       );
       error = message;
@@ -240,7 +484,24 @@ export async function traceUrl(
     }
 
     const responseTimeMs = Date.now() - started;
+    const rawSetCookies = extractRawSetCookies(response.headers);
+    const cookiesSet = cookieJar.ingestSetCookieHeaders(rawSetCookies, current);
     const headers = headersToObject(response.headers);
+    const referrerPolicyHeader = response.headers.get("referrer-policy");
+
+    const baseForensics: HopForensics = {
+      cookiesSet: cookiesSet.length > 0 ? cookiesSet : undefined,
+      cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+      refererSent,
+      embeddedTargets: embeddedTargets.length > 0 ? embeddedTargets : undefined,
+      securityHeaders: {
+        hsts: Boolean(response.headers.get("strict-transport-security")),
+        csp: Boolean(response.headers.get("content-security-policy")),
+        xFrameOptions: response.headers.get("x-frame-options"),
+        referrerPolicy: referrerPolicyHeader,
+      },
+    };
+
     const base = {
       index: i,
       url: current,
@@ -256,25 +517,36 @@ export async function traceUrl(
         verdict.addresses[0] ??
         null,
       addresses: verdict.addresses,
+      forensics: baseForensics,
     };
 
-    // --- 1. HTTP Location redirect
-    const location = response.headers.get("location");
-    if (isRedirect(response.status)) {
-      const resolved = location ? resolveAgainst(current, location) : null;
+    // --- 1. HTTP Location or custom Redirect header (Location, HX-Redirect, X-Redirect, X-Redirect-To)
+    const locationHeader =
+      response.headers.get("location") ??
+      response.headers.get("hx-redirect") ??
+      response.headers.get("x-redirect") ??
+      response.headers.get("x-redirect-to");
+    const hasCustomRedirectHeader = !response.headers.get("location") && Boolean(locationHeader);
+
+    if (isRedirect(response.status) || hasCustomRedirectHeader) {
+      const resolved = locationHeader ? resolveAgainst(current, locationHeader) : null;
       hops.push(
         makeHop({
           ...base,
           mechanism: "http-redirect",
-          redirectType: redirectTypeLabel(response.status),
-          location,
+          redirectType: hasCustomRedirectHeader
+            ? "Custom Header Redirect"
+            : redirectTypeLabel(response.status),
+          location: locationHeader,
           resolvedLocation: resolved,
           nextUrl: resolved,
-          mechanismDetail: `${response.status} ${redirectTypeLabel(response.status)}`,
+          mechanismDetail: hasCustomRedirectHeader
+            ? `${response.status} response with redirect header`
+            : `${response.status} ${redirectTypeLabel(response.status)}`,
           blockedReason: resolved
             ? null
-            : location
-              ? `The Location header "${location}" is not a valid URL.`
+            : locationHeader
+              ? `The Location header "${locationHeader}" is not a valid URL.`
               : "This redirect has no Location header (dead end).",
         }),
       );
@@ -285,6 +557,7 @@ export async function traceUrl(
         finalDestinationConfirmed = false;
         break;
       }
+      pendingReferer = computeNextReferer(current, resolved, referrerPolicyHeader);
       current = resolved;
       if (i === MAX_HOPS - 1) {
         truncated = true;
@@ -319,15 +592,19 @@ export async function traceUrl(
         finalDestinationConfirmed = false;
         break;
       }
+      pendingReferer = computeNextReferer(current, resolved, referrerPolicyHeader);
       current = resolved;
       continue;
     }
 
-    // --- 3. Inspect the body for client-side navigation
+    // --- 3. Inspect the body for client-side navigation & deep forensics
     const contentType = response.headers.get("content-type") ?? "";
     const contentLength = Number(response.headers.get("content-length") ?? "0");
     let html = "";
-    if (contentType.includes("html") && contentLength <= MAX_BODY_BYTES) {
+    if (
+      (contentType.includes("html") || contentType.includes("xhtml") || contentType === "") &&
+      contentLength <= MAX_BODY_BYTES
+    ) {
       try {
         html = (await response.text()).slice(0, 500_000);
       } catch {
@@ -338,16 +615,28 @@ export async function traceUrl(
     }
 
     if (html) {
-      const meta = extractPageMeta(html);
-      page = { canonical: meta.canonical, metaRobots: meta.metaRobots };
+      page = extractPageMeta(html, current);
     }
 
-    const detection = html ? detectClientRedirect(html) : { signal: null, hint: null };
+    const detection = html
+      ? detectClientRedirect(html, current)
+      : { signal: null, hint: null, hiddenArtifacts: [] };
+
+    if (detection.hiddenArtifacts.length > 0) {
+      baseForensics.hiddenArtifacts = detection.hiddenArtifacts;
+    }
 
     if (detection.signal) {
       const resolved = resolveAgainst(current, detection.signal.rawTarget);
       const mechanism: HopMechanism =
-        detection.signal.kind === "meta-refresh" ? "meta-refresh" : "javascript-redirect";
+        detection.signal.kind === "meta-refresh"
+          ? "meta-refresh"
+          : detection.signal.kind === "form-redirect"
+            ? "form-redirect"
+            : "javascript-redirect";
+      if (detection.signal.deobfuscationSteps?.length) {
+        baseForensics.deobfuscationSteps = detection.signal.deobfuscationSteps;
+      }
       hops.push(
         makeHop({
           ...base,
@@ -361,6 +650,7 @@ export async function traceUrl(
           blockedReason: resolved
             ? null
             : `The detected destination "${detection.signal.rawTarget}" is not a valid URL.`,
+          forensics: baseForensics,
         }),
       );
       if (!resolved) {
@@ -369,6 +659,7 @@ export async function traceUrl(
         finalDestinationConfirmed = false;
         break;
       }
+      pendingReferer = computeNextReferer(current, resolved, referrerPolicyHeader);
       current = resolved;
       if (i === MAX_HOPS - 1) {
         truncated = true;
@@ -378,12 +669,66 @@ export async function traceUrl(
       continue;
     }
 
-    if (detection.hint && looksLikeRedirector(html)) {
-      // Dynamic navigation: only a real browser can resolve it.
-      const browserBudget = Math.min(30_000, deadline - Date.now());
+    // --- 4. Embedded Gateway / Link-Shim Unwrap Fallback
+    // If a known redirect wrapper or blocked gateway hop carries an embedded target URL in its
+    // query string or path (e.g., ?url=https://..., ?u=aHR0cHM6..., l.facebook.com, google.com/url,
+    // Proofpoint, SafeLinks), unwrap and follow it when the server didn't issue an HTTP redirect.
+    const primaryEmbedded = embeddedTargets[0];
+    if (
+      primaryEmbedded &&
+      (response.status >= 400 ||
+        isLikelyGatewayOrWrapperUrl(current) ||
+        (html && looksLikeRedirector(html)))
+    ) {
+      const resolved = resolveAgainst(current, primaryEmbedded.url);
+      if (resolved && !seen.has(canonicalKey(resolved))) {
+        baseForensics.deobfuscationSteps = [
+          ...(baseForensics.deobfuscationSteps ?? []),
+          `Unwrapped embedded target from ${primaryEmbedded.source} (${primaryEmbedded.encoding})`,
+        ];
+        hops.push(
+          makeHop({
+            ...base,
+            mechanism: "gateway-unwrap",
+            redirectType: "Gateway Unwrap",
+            location: primaryEmbedded.url,
+            resolvedLocation: resolved,
+            nextUrl: resolved,
+            mechanismDetail: `Unwrapped ${primaryEmbedded.source} (${primaryEmbedded.encoding})`,
+            evidence: `${primaryEmbedded.source} → ${primaryEmbedded.url}`,
+            forensics: baseForensics,
+          }),
+        );
+        pendingReferer = computeNextReferer(current, resolved, referrerPolicyHeader);
+        current = resolved;
+        if (i === MAX_HOPS - 1) {
+          truncated = true;
+          terminationReason = "max-hops";
+          finalDestinationConfirmed = false;
+        }
+        continue;
+      }
+    }
+
+    const hasExternalScriptInThinPage =
+      Boolean(html) &&
+      looksLikeRedirector(html) &&
+      /<script[^>]+src\s*=\s*["'][^"']+["']/i.test(html);
+    const isBotChallengedHop =
+      response.status === 403 || response.status === 429 || response.status === 503;
+
+    if (detection.hint || hasExternalScriptInThinPage || isBotChallengedHop) {
+      // Dynamic navigation, external script redirector, or anti-bot interstitial:
+      // resolve in our sandboxed headless Chromium engine.
+      const triggerMethod =
+        detection.hint?.method ??
+        (hasExternalScriptInThinPage
+          ? "external <script src> redirector"
+          : `HTTP ${response.status} challenge / interstitial`);
+      const browserBudget = Math.min(25_000, deadline - Date.now());
       const rendered =
-        browserBudget > 5000
-          ? await traceWithBrowser(current, browserBudget)
+        browserBudget > 4500
+          ? await traceWithBrowser(current, browserBudget, preset.ua)
           : {
               ok: false as const,
               reason: "Not enough time left in the analysis budget to run the headless browser.",
@@ -398,6 +743,17 @@ export async function traceUrl(
         canonicalKey(rendered.finalUrl) !== canonicalKey(current)
       ) {
         browserFallbackUsed = true;
+        const navSteps = rendered.navigations
+          .filter((n) => canonicalKey(n.url) !== canonicalKey(current))
+          .map((n) => `Browser hop (${n.method}): ${n.url} [${n.ms} ms]`);
+        baseForensics.deobfuscationSteps = [
+          ...(baseForensics.deobfuscationSteps ?? []),
+          `Executed ${triggerMethod} in isolated headless Chromium (${rendered.elapsedMs} ms)`,
+          ...navSteps,
+        ];
+        if (rendered.finalHtml) {
+          page = extractPageMeta(rendered.finalHtml, rendered.finalUrl);
+        }
         hops.push(
           makeHop({
             ...base,
@@ -406,37 +762,44 @@ export async function traceUrl(
             location: rendered.finalUrl,
             resolvedLocation: rendered.finalUrl,
             nextUrl: rendered.finalUrl,
-            mechanismDetail: `${detection.hint.method}, resolved in an isolated headless browser (${rendered.elapsedMs} ms)`,
-            evidence: detection.hint.evidence,
+            mechanismDetail: `${triggerMethod}, resolved in headless browser (${rendered.elapsedMs} ms)`,
+            evidence: detection.hint?.evidence ?? null,
+            forensics: baseForensics,
           }),
         );
+        pendingReferer = computeNextReferer(current, rendered.finalUrl, referrerPolicyHeader);
         current = rendered.finalUrl;
         continue;
       }
 
-      const reason = rendered.ok
-        ? "The isolated browser loaded the page without navigating anywhere else, so this is treated as the final destination."
-        : rendered.reason;
-      if (!rendered.ok) {
-        browserFallbackNote = reason;
-        finalDestinationConfirmed = false;
-        terminationReason = browserFallbackConfigured() ? "browser-failed" : "browser-unavailable";
-        terminationDetail = reason;
+      if (detection.hint && looksLikeRedirector(html)) {
+        const reason = rendered.ok
+          ? "The isolated browser loaded the page without navigating anywhere else, so this is treated as the final destination."
+          : rendered.reason;
+        if (!rendered.ok) {
+          browserFallbackNote = reason;
+          finalDestinationConfirmed = false;
+          terminationReason = browserFallbackConfigured()
+            ? "browser-failed"
+            : "browser-unavailable";
+          terminationDetail = reason;
+        }
+        hops.push(
+          makeHop({
+            ...base,
+            mechanism: rendered.ok ? "final-response" : "unresolved",
+            redirectType: rendered.ok ? "Final Response" : "Client-side redirect not followed",
+            mechanismDetail: `Page contains ${detection.hint.method}`,
+            evidence: detection.hint.evidence,
+            blockedReason: rendered.ok ? null : reason,
+            forensics: baseForensics,
+          }),
+        );
+        break;
       }
-      hops.push(
-        makeHop({
-          ...base,
-          mechanism: rendered.ok ? "final-response" : "unresolved",
-          redirectType: rendered.ok ? "Final Response" : "Client-side redirect not followed",
-          mechanismDetail: `Page contains ${detection.hint.method}`,
-          evidence: detection.hint.evidence,
-          blockedReason: rendered.ok ? null : reason,
-        }),
-      );
-      break;
     }
 
-    // --- 4. Genuine final response
+    // --- 5. Genuine final response
     hops.push(
       makeHop({
         ...base,
@@ -445,7 +808,8 @@ export async function traceUrl(
         mechanismDetail:
           response.status >= 400
             ? `${response.status} ${redirectTypeLabel(response.status)} — chain ends with an error response`
-            : "No further redirect found (HTTP, meta refresh or JavaScript).",
+            : "No further redirect found (HTTP, meta refresh, form, gateway or JavaScript).",
+        forensics: baseForensics,
       }),
     );
     if (response.status >= 400) {
@@ -478,7 +842,7 @@ function finish(input: {
   hops: RedirectHop[];
   redirectLoop: boolean;
   truncated: boolean;
-  page: { canonical: string | null; metaRobots: string | null };
+  page: import("./redirect-analysis").PageMetaInput;
   error: string | null;
   terminationReason: string;
   terminationDetail: string | null;
@@ -508,4 +872,3 @@ function finish(input: {
     browserFallbackNote: input.browserFallbackNote,
   };
 }
-

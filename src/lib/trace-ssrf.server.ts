@@ -11,13 +11,29 @@
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const ALLOWED_PORTS = new Set(["", "80", "443", "8080", "8443", "8000"]);
 
-const BLOCKED_HOST_SUFFIXES = [".localhost", ".local", ".internal", ".home.arpa", ".onion"];
+const BLOCKED_HOST_SUFFIXES = [
+  ".localhost",
+  ".local",
+  ".internal",
+  ".home.arpa",
+  ".onion",
+  ".corp",
+  ".lan",
+  ".intranet",
+  ".localdomain",
+];
 
 const BLOCKED_HOSTS = new Set([
   "localhost",
   "metadata.google.internal",
   "metadata",
   "instance-data",
+  "host.docker.internal",
+  "gateway.docker.internal",
+  "kubernetes.default",
+  "kubernetes.default.svc",
+  "100.100.100.200", // Alibaba Cloud metadata
+  "192.0.0.192", // Oracle Cloud metadata
 ]);
 
 export interface UrlVerdict {
@@ -110,7 +126,10 @@ function parseIpv6Words(raw: string): number[] | null {
 }
 
 export function classifyIp(ip: string): string | null {
-  const clean = ip.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  const clean = ip
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
 
   if (clean.includes(":")) {
     const words = parseIpv6Words(clean);
@@ -190,13 +209,10 @@ function getDohEndpoint(): string {
 async function resolve(host: string, type: "A" | "AAAA", timeoutMs: number): Promise<string[]> {
   const dohBase = getDohEndpoint();
   const sep = dohBase.includes("?") ? "&" : "?";
-  const response = await fetch(
-    `${dohBase}${sep}name=${encodeURIComponent(host)}&type=${type}`,
-    {
-      headers: { accept: "application/dns-json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    },
-  );
+  const response = await fetch(`${dohBase}${sep}name=${encodeURIComponent(host)}&type=${type}`, {
+    headers: { accept: "application/dns-json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   if (!response.ok) throw new Error(`DNS lookup returned ${response.status}`);
   const payload = (await response.json()) as DohAnswer;
   const wanted = type === "A" ? 1 : 28;
