@@ -34,7 +34,7 @@ import {
   looksLikeRedirector,
   parseRefreshValue,
 } from "./trace-detect";
-import { assertSafeUrl } from "./trace-ssrf.server";
+import { assertSafeUrl, readBoundedText } from "./trace-ssrf.server";
 import { browserFallbackConfigured, traceWithBrowser } from "./trace-browser.server";
 import type {
   HopCookieInfo,
@@ -74,6 +74,9 @@ interface StoredCookie {
 }
 
 /** Lightweight per-trace cookie jar so multi-hop affiliate & auth trackers don't drop sessions. */
+const MAX_COOKIES_PER_TRACE = 50;
+const MAX_COOKIE_VALUE_BYTES = 2048;
+
 export class TraceCookieJar {
   private store = new Map<string, StoredCookie>();
 
@@ -86,7 +89,7 @@ export class TraceCookieJar {
       return recorded;
     }
 
-    for (const raw of rawCookies) {
+    for (const raw of rawCookies.slice(0, MAX_COOKIES_PER_TRACE)) {
       const parts = raw
         .split(";")
         .map((p) => p.trim())
@@ -96,8 +99,16 @@ export class TraceCookieJar {
       const eqIdx = first.indexOf("=");
       if (eqIdx <= 0) continue;
 
-      const name = first.slice(0, eqIdx).trim();
-      const value = first.slice(eqIdx + 1).trim();
+      const name = first
+        .slice(0, eqIdx)
+        .trim()
+        .replace(/[\r\n\0;]/g, "")
+        .slice(0, 128);
+      const value = first
+        .slice(eqIdx + 1)
+        .trim()
+        .replace(/[\r\n\0]/g, "")
+        .slice(0, MAX_COOKIE_VALUE_BYTES);
       if (!name) continue;
 
       let domain = reqUrl.hostname.toLowerCase();
@@ -110,12 +121,16 @@ export class TraceCookieJar {
       for (const attr of parts.slice(1)) {
         const [kRaw, vRaw] = attr.split("=");
         const k = (kRaw ?? "").trim().toLowerCase();
-        const v = (vRaw ?? "").trim();
+        const v = (vRaw ?? "").trim().replace(/[\r\n\0]/g, "");
         if (k === "domain" && v) {
-          domain = v.replace(/^\.+/, "").toLowerCase();
-          flags.push(`Domain=${domain}`);
+          const cleanedDomain = v.replace(/^\.+/, "").toLowerCase();
+          // Refuse single-label TLD cookie poisoning (e.g. Domain=.com)
+          if (cleanedDomain.includes(".")) {
+            domain = cleanedDomain;
+            flags.push(`Domain=${domain}`);
+          }
         } else if (k === "path" && v) {
-          path = v;
+          path = v.slice(0, 256);
         } else if (k === "secure") {
           secure = true;
           flags.push("Secure");
@@ -123,14 +138,17 @@ export class TraceCookieJar {
           httpOnly = true;
           flags.push("HttpOnly");
         } else if (k === "samesite" && v) {
-          sameSite = v;
-          flags.push(`SameSite=${v}`);
+          sameSite = v.slice(0, 32);
+          flags.push(`SameSite=${sameSite}`);
         }
       }
 
       // Security check: only allow setting cookie for same host or parent domain
       const reqHost = reqUrl.hostname.toLowerCase();
-      if (reqHost === domain || reqHost.endsWith(`.${domain}`)) {
+      if (
+        this.store.size < MAX_COOKIES_PER_TRACE &&
+        (reqHost === domain || reqHost.endsWith(`.${domain}`))
+      ) {
         this.store.set(`${domain}|${path}|${name}`, {
           name,
           value,
@@ -606,7 +624,7 @@ export async function traceUrl(
       contentLength <= MAX_BODY_BYTES
     ) {
       try {
-        html = (await response.text()).slice(0, 500_000);
+        html = await readBoundedText(response, 500_000);
       } catch {
         html = "";
       }

@@ -1,16 +1,20 @@
 /**
- * SSRF protection for the trace engine.
+ * Enterprise SSRF, DNS-Rebinding, & Stream-Bomb Protection Engine.
  *
- * Every destination — the user's input and every hop discovered afterwards —
- * must pass `assertSafeUrl` before a request is made to it. Hostnames are
- * resolved over DNS-over-HTTPS and the resulting addresses are checked against
- * loopback / private / reserved ranges, so a public hostname that points at an
- * internal address is rejected too.
+ * Every destination — the user's input, every hop discovered afterwards, remote
+ * sitemaps, short-link targets, and outgoing webhooks — must pass `assertSafeUrl`
+ * before a request is made to it. Hostnames are resolved over DNS-over-HTTPS and
+ * all resulting A/AAAA addresses are checked against loopback, private, link-local,
+ * cloud metadata, NAT64, 6to4, Teredo, and reserved ranges.
  */
 
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const ALLOWED_PORTS = new Set(["", "80", "443", "8080", "8443", "8000"]);
 
+/**
+ * Internal suffixes, local TLDs, and known DNS-rebinding / SSRF-callback domains
+ * that alternate between public and loopback/metadata IPs.
+ */
 const BLOCKED_HOST_SUFFIXES = [
   ".localhost",
   ".local",
@@ -21,6 +25,24 @@ const BLOCKED_HOST_SUFFIXES = [
   ".lan",
   ".intranet",
   ".localdomain",
+  // Known DNS-rebinding & SSRF out-of-band callback services
+  ".nip.io",
+  ".sslip.io",
+  ".xip.io",
+  ".lvh.me",
+  ".vcap.me",
+  ".localtest.me",
+  ".1u.ms",
+  ".rbndr.us",
+  ".burpcollaborator.net",
+  ".oastify.com",
+  ".interact.sh",
+  ".oast.pro",
+  ".oast.live",
+  ".oast.site",
+  ".oast.online",
+  ".oast.fun",
+  ".oast.me",
 ];
 
 const BLOCKED_HOSTS = new Set([
@@ -32,6 +54,9 @@ const BLOCKED_HOSTS = new Set([
   "gateway.docker.internal",
   "kubernetes.default",
   "kubernetes.default.svc",
+  "169.254.169.254", // AWS / GCP / Azure IMDS
+  "169.254.170.2", // AWS ECS task metadata
+  "fd00:ec2::254", // AWS IPv6 IMDSv2
   "100.100.100.200", // Alibaba Cloud metadata
   "192.0.0.192", // Oracle Cloud metadata
 ]);
@@ -73,12 +98,14 @@ const V4_BLOCKS: Array<[string, number, string]> = [
   ["172.16.0.0", 12, "private network"],
   ["192.0.0.0", 24, "IETF protocol assignments"],
   ["192.0.2.0", 24, "documentation range"],
+  ["192.88.99.0", 24, "6to4 relay anycast range"],
   ["192.168.0.0", 16, "private network"],
   ["198.18.0.0", 15, "benchmarking range"],
   ["198.51.100.0", 24, "documentation range"],
   ["203.0.113.0", 24, "documentation range"],
   ["224.0.0.0", 4, "multicast range"],
   ["240.0.0.0", 4, "reserved range"],
+  ["255.255.255.255", 32, "broadcast address"],
 ];
 
 function parseIpv6Words(raw: string): number[] | null {
@@ -123,6 +150,26 @@ function parseIpv6Words(raw: string): number[] | null {
   const full = parseSide(addr);
   if (!full || full.length !== 8) return null;
   return full;
+}
+
+/**
+ * Detects obfuscated IPv4 literals (octal 0177.0.0.1, hex 0x7f.0.0.1 / 0x7f000001,
+ * integer 2130706433, or 2/3-part shorthand 127.1 / 127.0.1).
+ */
+function isObfuscatedIpv4Literal(host: string): boolean {
+  if (/^\d+$/.test(host)) return true;
+  if (/^0x[0-9a-f]+$/i.test(host)) return true;
+  const parts = host.split(".");
+  if (parts.length >= 2 && parts.length <= 4) {
+    const allNumericOrHex = parts.every((p) => /^\d+$/.test(p) || /^0x[0-9a-f]+$/i.test(p));
+    if (allNumericOrHex) {
+      if (parts.length !== 4) return true;
+      if (parts.some((p) => /^0x/i.test(p) || (p.length > 1 && p.startsWith("0")))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function classifyIp(ip: string): string | null {
@@ -181,6 +228,10 @@ export function classifyIp(ip: string): string | null {
     return null;
   }
 
+  if (isObfuscatedIpv4Literal(clean)) {
+    return "malformed IPv4 address";
+  }
+
   const value = ipv4ToInt(clean);
   if (value === null) return "malformed IPv4 address";
   for (const [base, bits, label] of V4_BLOCKS) {
@@ -193,7 +244,9 @@ export function classifyIp(ip: string): string | null {
 }
 
 function isIpLiteral(host: string): boolean {
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
+  return (
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":") || isObfuscatedIpv4Literal(host)
+  );
 }
 
 interface DohAnswer {
@@ -252,6 +305,15 @@ async function resolveHostAddresses(host: string, timeoutMs: number): Promise<st
 }
 
 export async function assertSafeUrl(raw: string, timeoutMs = 5000): Promise<UrlVerdict> {
+  if (/[\r\n\0]/.test(raw)) {
+    return {
+      ok: false,
+      reason: "Blocked: URL contains illegal control or CRLF characters.",
+      url: null,
+      addresses: [],
+    };
+  }
+
   let url: URL;
   try {
     url = new URL(raw);
@@ -286,14 +348,17 @@ export async function assertSafeUrl(raw: string, timeoutMs = 5000): Promise<UrlV
     };
   }
 
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = url.hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
   if (!host) {
     return { ok: false, reason: "Blocked: the URL has no hostname.", url, addresses: [] };
   }
   if (BLOCKED_HOSTS.has(host) || BLOCKED_HOST_SUFFIXES.some((s) => host.endsWith(s))) {
     return {
       ok: false,
-      reason: `Blocked: "${host}" is a local or internal hostname.`,
+      reason: `Blocked: "${host}" is a local, internal, or DNS-rebinding hostname.`,
       url,
       addresses: [],
     };
@@ -336,4 +401,107 @@ export async function assertSafeUrl(raw: string, timeoutMs = 5000): Promise<UrlV
   }
 
   return { ok: true, reason: null, url, addresses };
+}
+
+/**
+ * Streaming Byte-Bounded Body Reader.
+ * Protects the server from chunked transfer stream bombs, decompression bombs,
+ * and memory-exhaustion jammers by counting raw bytes as they arrive and
+ * immediately cancelling the underlying socket stream once `maxBytes` is reached.
+ */
+export async function readBoundedText(response: Response, maxBytes = 500_000): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const chunks: string[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          const allowed = value.byteLength - (totalBytes - maxBytes);
+          if (allowed > 0) {
+            chunks.push(decoder.decode(value.subarray(0, allowed), { stream: false }));
+          }
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        chunks.push(decoder.decode(value, { stream: true }));
+      }
+    }
+    chunks.push(decoder.decode());
+  } catch {
+    await reader.cancel().catch(() => {});
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+  return chunks.join("");
+}
+
+/**
+ * SSRF-Safe Hop-Validated Fetch.
+ * Never uses `redirect: "follow"` (which would allow a public URL to 302-redirect
+ * to 127.0.0.1 or 169.254.169.254 without re-running `assertSafeUrl`). Instead,
+ * validates every intermediate redirect hop through `assertSafeUrl`.
+ */
+export async function safeFetchWithRedirects(
+  initialUrl: string,
+  init: RequestInit = {},
+  options: { maxHops?: number; timeoutMs?: number } = {},
+): Promise<{ response: Response; finalUrl: string }> {
+  const maxHops = options.maxHops ?? 5;
+  const timeoutMs = options.timeoutMs ?? 6000;
+  let currentUrl = initialUrl;
+  const visited = new Set<string>();
+
+  for (let hop = 0; hop <= maxHops; hop++) {
+    if (visited.has(currentUrl)) {
+      throw new Error("Redirect loop detected while fetching resource.");
+    }
+    visited.add(currentUrl);
+
+    const safety = await assertSafeUrl(currentUrl, Math.min(4000, timeoutMs));
+    if (!safety.ok) {
+      throw new Error(safety.reason ?? "Blocked unsafe redirect destination.");
+    }
+
+    const res = await fetch(currentUrl, {
+      ...init,
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      await res.body?.cancel().catch(() => {});
+      if (!loc) {
+        return { response: res, finalUrl: currentUrl };
+      }
+      if (hop === maxHops) {
+        throw new Error(`Exceeded maximum safe redirects (${maxHops}).`);
+      }
+      currentUrl = new URL(loc, currentUrl).toString();
+      // For POST webhooks, never follow redirects to prevent POST-to-GET or SSRF replay
+      if (
+        init.method &&
+        init.method.toUpperCase() !== "GET" &&
+        init.method.toUpperCase() !== "HEAD"
+      ) {
+        throw new Error("Redirects are not allowed on outbound POST webhook requests.");
+      }
+      continue;
+    }
+
+    return { response: res, finalUrl: currentUrl };
+  }
+
+  throw new Error("Failed to resolve URL safely.");
 }

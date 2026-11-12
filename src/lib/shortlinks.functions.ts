@@ -33,22 +33,36 @@ function randomSlug(): string {
   return Array.from(bytes, (b) => chars[b % chars.length]).join("");
 }
 
-async function withShortLinkWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
-  const { acquireConcurrencySlot, checkRateLimit, extractClientFingerprint, extractClientIp } =
-    await import("./security.server");
+async function withShortLinkGuard<T>(
+  tier: "shortlink-write" | "shortlink-read",
+  fn: () => Promise<T>,
+): Promise<T> {
+  const {
+    acquireConcurrencySlot,
+    checkRateLimit,
+    extractClientFingerprint,
+    extractClientIp,
+    inspectIncomingRequest,
+  } = await import("./security.server");
   let req: Request | null = null;
   try {
     req = getRequest();
   } catch {
     req = null;
   }
+  if (req) {
+    const waf = inspectIncomingRequest(req);
+    if (!waf.ok) {
+      throw new Error(waf.reason ?? "Request blocked by security policy.");
+    }
+  }
   const fp = extractClientFingerprint(req);
   const ip = extractClientIp(req);
-  const limit = checkRateLimit(fp, "shortlink-write");
+  const limit = checkRateLimit(fp, tier);
   if (!limit.ok) {
     throw new Error(limit.reason ?? "Too many short link actions. Please wait a moment.");
   }
-  const slot = acquireConcurrencySlot(ip, "shortlink-write");
+  const slot = acquireConcurrencySlot(ip, tier);
   if (!slot.ok) {
     throw new Error(slot.reason ?? "Too many simultaneous short link operations.");
   }
@@ -57,6 +71,14 @@ async function withShortLinkWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
   } finally {
     slot.release();
   }
+}
+
+function withShortLinkWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
+  return withShortLinkGuard("shortlink-write", fn);
+}
+
+function withShortLinkReadGuard<T>(fn: () => Promise<T>): Promise<T> {
+  return withShortLinkGuard("shortlink-read", fn);
 }
 
 export const createShortLink = createServerFn({ method: "POST" })
@@ -100,14 +122,16 @@ export const createShortLink = createServerFn({ method: "POST" })
 
 export const listShortLinks = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ owner }).parse(d))
-  .handler(async ({ data }) => {
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { data: rows, error } = await shortLinkDb().rpc("list_short_links", {
-      p_owner: data.owner,
-    });
-    if (error) throw dbError(error.message);
-    return (rows ?? []) as ShortLink[];
-  });
+  .handler(async ({ data }) =>
+    withShortLinkReadGuard(async () => {
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { data: rows, error } = await shortLinkDb().rpc("list_short_links", {
+        p_owner: data.owner,
+      });
+      if (error) throw dbError(error.message);
+      return (rows ?? []) as ShortLink[];
+    }),
+  );
 
 export const setShortLinkEnabled = createServerFn({ method: "POST" })
   .inputValidator((d) => z.object({ id: z.string().uuid(), enabled: z.boolean(), owner }).parse(d))
@@ -281,32 +305,36 @@ const range = z.object({
 
 export const getLinkAnalytics = createServerFn({ method: "POST" })
   .inputValidator((d) => range.parse(d))
-  .handler(async ({ data }) => {
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { data: res, error } = await shortLinkDb().rpc("link_analytics", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_from: data.from,
-      p_to: data.to,
-    });
-    if (error) throw dbError(error.message);
-    if (!res) throw new Error("Link not found.");
-    return res as unknown as LinkAnalytics;
-  });
+  .handler(async ({ data }) =>
+    withShortLinkReadGuard(async () => {
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { data: res, error } = await shortLinkDb().rpc("link_analytics", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_from: data.from,
+        p_to: data.to,
+      });
+      if (error) throw dbError(error.message);
+      if (!res) throw new Error("Link not found.");
+      return res as unknown as LinkAnalytics;
+    }),
+  );
 
 export const exportLinkClicks = createServerFn({ method: "POST" })
   .inputValidator((d) => range.parse(d))
-  .handler(async ({ data }) => {
-    const { shortLinkDb } = await import("./shortlinks.server");
-    const { data: rows, error } = await shortLinkDb().rpc("export_link_clicks", {
-      p_id: data.id,
-      p_owner: data.owner,
-      p_from: data.from,
-      p_to: data.to,
-    });
-    if (error) throw dbError(error.message);
-    return (rows ?? []) as Record<string, string | boolean | null>[];
-  });
+  .handler(async ({ data }) =>
+    withShortLinkReadGuard(async () => {
+      const { shortLinkDb } = await import("./shortlinks.server");
+      const { data: rows, error } = await shortLinkDb().rpc("export_link_clicks", {
+        p_id: data.id,
+        p_owner: data.owner,
+        p_from: data.from,
+        p_to: data.to,
+      });
+      if (error) throw dbError(error.message);
+      return (rows ?? []) as Record<string, string | boolean | null>[];
+    }),
+  );
 
 export interface DestinationHealthResult {
   id: string;
@@ -338,36 +366,23 @@ export const checkShortLinksHealth = createServerFn({ method: "POST" })
   )
   .handler(async ({ data }): Promise<DestinationHealthResult[]> =>
     withShortLinkWriteGuard(async () => {
-      const { assertSafeUrl } = await import("./trace-ssrf.server");
+      const { safeFetchWithRedirects } = await import("./trace-ssrf.server");
       const results = await Promise.all(
         data.items.map(async (item): Promise<DestinationHealthResult> => {
           const started = performance.now();
-          const safety = await assertSafeUrl(item.url);
-          if (!safety.ok) {
-            return {
-              id: item.id,
-              url: item.url,
-              ok: false,
-              status: null,
-              statusText: "Blocked",
-              latencyMs: Math.round(performance.now() - started),
-              finalUrl: null,
-              error: safety.reason ?? "Blocked destination",
-            };
-          }
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 6000);
           try {
-            const res = await fetch(item.url, {
-              method: "GET",
-              redirect: "follow",
-              signal: controller.signal,
-              headers: {
-                "user-agent":
-                  "Mozilla/5.0 (compatible; CROSX-LinkHealthCheck/1.0; +https://rca.crosx.in)",
-                accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            const { response: res, finalUrl } = await safeFetchWithRedirects(
+              item.url,
+              {
+                method: "GET",
+                headers: {
+                  "user-agent":
+                    "Mozilla/5.0 (compatible; CROSX-LinkHealthCheck/1.0; +https://rca.crosx.in)",
+                  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
               },
-            });
+              { maxHops: 5, timeoutMs: 6000 },
+            );
             try {
               await res.body?.cancel();
             } catch {
@@ -381,22 +396,22 @@ export const checkShortLinksHealth = createServerFn({ method: "POST" })
               status: res.status,
               statusText: res.statusText || (res.ok ? "OK" : `HTTP ${res.status}`),
               latencyMs,
-              finalUrl: res.url || item.url,
+              finalUrl: finalUrl || item.url,
               error: res.status >= 400 ? `HTTP ${res.status}` : null,
             };
           } catch (err) {
+            const msg = err instanceof Error ? err.message : "Connection failed";
+            const isBlocked = /Blocked|SSRF|loop|private|internal|not allowed/i.test(msg);
             return {
               id: item.id,
               url: item.url,
               ok: false,
               status: null,
-              statusText: "Unreachable",
+              statusText: isBlocked ? "Blocked" : "Unreachable",
               latencyMs: Math.round(performance.now() - started),
               finalUrl: null,
-              error: err instanceof Error ? err.message : "Connection failed",
+              error: msg,
             };
-          } finally {
-            clearTimeout(timer);
           }
         }),
       );
