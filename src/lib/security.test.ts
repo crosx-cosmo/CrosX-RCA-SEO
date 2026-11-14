@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { csvCell, sanitizeCsvFormula } from "./redirect-export";
 import {
   acquireConcurrencySlot,
   applySecurityHeaders,
@@ -13,6 +14,8 @@ import {
   isIpQuarantined,
   resetSecurityStateForTests,
 } from "./security.server";
+import { scanRedirectThreats } from "./threat-scanner";
+import { detectClientRedirect } from "./trace-detect";
 import { assertSafeUrl, classifyIp, readBoundedText } from "./trace-ssrf.server";
 
 test("WAF allows legitimate analyzer and API requests", () => {
@@ -304,4 +307,83 @@ test("Security headers and constant-time comparison work deterministically", () 
   assert.ok(res.headers.get("content-security-policy")?.includes("frame-ancestors 'self'"));
   assert.ok(res.headers.get("content-security-policy")?.includes("https://aistudio.google.com"));
   assert.equal(res.headers.get("server-timing"), "ssr;dur=12.3");
+});
+
+test("Hardened Mock-DOM VM sandbox blocks prototype-chain escape probes while still solving obfuscated JS redirects", () => {
+  // 1. Prototype-escape attempt via .constructor.constructor to access host process
+  const escapeAttemptHtml = `
+    <html><body><script>
+      const hostProc = window.setTimeout.constructor("return process")();
+      const target = ["https://escaped.example.com", hostProc.version].join("/");
+      window.location.replace(target);
+    </script></body></html>
+  `;
+  const escapeResult = detectClientRedirect(escapeAttemptHtml, "https://gate.example.com/");
+  assert.equal(
+    escapeResult.signal,
+    null,
+    "Prototype-escape script must be rejected before/during VM execution",
+  );
+
+  // 2. __proto__ / getPrototypeOf escape attempt
+  const protoEscapeHtml = `
+    <html><body><script>
+      const p = Object.getPrototypeOf(window).__proto__;
+      const u = p ? "https://proto-escaped.example.com/" + String(p) : "";
+      window.location.replace(u);
+    </script></body></html>
+  `;
+  assert.equal(detectClientRedirect(protoEscapeHtml, "https://gate.example.com/").signal, null);
+
+  // 3. Legitimate computed/base64/timer JS redirect still works inside isolated VM realm
+  const validComputedHtml = `
+    <html><body><script>
+      setTimeout(function() {
+        var encoded = "aHR0cHM6Ly9sZWdpdC1kZXN0aW5hdGlvbi5leGFtcGxlLmNvbS9vZmZlcj9pZD03Nzc=";
+        window.location.replace(atob(encoded));
+      }, 1500);
+    </script></body></html>
+  `;
+  const validResult = detectClientRedirect(validComputedHtml, "https://gate.example.com/");
+  assert.ok(validResult.signal, "Legitimate computed redirect in VM sandbox should be detected");
+  assert.equal(validResult.signal.rawTarget, "https://legit-destination.example.com/offer?id=777");
+  assert.equal(validResult.signal.kind, "javascript-redirect");
+});
+
+test("CSV Formula / DDE Injection neutralization escapes formula prefixes while preserving negative numbers and normal strings", () => {
+  assert.equal(sanitizeCsvFormula("=CMD|' /C calc'!A0"), "'=CMD|' /C calc'!A0");
+  assert.equal(sanitizeCsvFormula("+SUM(A1:A10)"), "'+SUM(A1:A10)");
+  assert.equal(sanitizeCsvFormula("@SUM(1,2)"), "'@SUM(1,2)");
+  assert.equal(sanitizeCsvFormula("-2+3+cmd|' /C calc'!A0"), "'-2+3+cmd|' /C calc'!A0");
+  assert.equal(sanitizeCsvFormula("\t=1+1"), "'\t=1+1");
+  assert.equal(sanitizeCsvFormula("-42.5"), "-42.5");
+  assert.equal(sanitizeCsvFormula("https://rca.crosx.in/offer"), "https://rca.crosx.in/offer");
+
+  assert.equal(
+    csvCell('=HYPERLINK("https://evil.test","Click")'),
+    '"\'=HYPERLINK(""https://evil.test"",""Click"")"',
+  );
+  assert.equal(csvCell(301), '"301"');
+});
+
+test("Threat scanner flags .monster high-risk TLD after typo fix", async () => {
+  const { buildDemoAnalysis } = await import("./redirect-demo");
+  const demo = buildDemoAnalysis("https://promo-gateway.monster/claim");
+  const monsterChain = {
+    ...demo,
+    inputUrl: "https://promo-gateway.monster/claim",
+    finalUrl: "https://promo-gateway.monster/claim",
+    hops: [
+      {
+        ...demo.hops[0]!,
+        url: "https://promo-gateway.monster/claim",
+        protocol: "https" as const,
+      },
+    ],
+  };
+  const report = scanRedirectThreats(monsterChain);
+  assert.ok(
+    report.findings.some((f) => f.category === "suspicious-tld" && f.title.includes(".monster")),
+    "Expected .monster domain to trigger suspicious-tld threat finding",
+  );
 });

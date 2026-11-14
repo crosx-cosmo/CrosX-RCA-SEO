@@ -14,27 +14,42 @@ export const SLOW_HOP_MS = 1500;
 
 export const USER_AGENT_PRESETS: Record<
   UserAgentPreset,
-  { label: string; shortLabel: string; ua: string }
+  {
+    label: string;
+    shortLabel: string;
+    ua: string;
+    secChUa?: string;
+    secChUaMobile?: string;
+    secChUaPlatform?: string;
+  }
 > = {
   "desktop-chrome": {
     label: "Desktop Chrome (Windows)",
     shortLabel: "Desktop Chrome",
-    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 RedirectChainAnalyzer/2.0",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    secChUa: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    secChUaMobile: "?0",
+    secChUaPlatform: '"Windows"',
   },
   "mobile-iphone": {
     label: "Mobile Safari (iPhone iOS)",
     shortLabel: "iPhone iOS",
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1 RedirectChainAnalyzer/2.0",
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    secChUaMobile: "?1",
+    secChUaPlatform: '"iOS"',
   },
   "mobile-android": {
     label: "Mobile Chrome (Android Pixel)",
     shortLabel: "Android Chrome",
-    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 RedirectChainAnalyzer/2.0",
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    secChUa: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    secChUaMobile: "?1",
+    secChUaPlatform: '"Android"',
   },
   "googlebot-smartphone": {
     label: "Googlebot Smartphone",
     shortLabel: "Googlebot Mobile",
-    ua: "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    ua: "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
   },
   "googlebot-desktop": {
     label: "Googlebot Desktop",
@@ -123,7 +138,7 @@ const REDIRECTING_MECHANISMS = new Set([
 ]);
 
 /** True when this hop hands off to another URL (HTTP or client-side). */
-export function hopRedirects(hop: RedirectHop): boolean {
+function hopRedirects(hop: RedirectHop): boolean {
   if (hop.mechanism) return REDIRECTING_MECHANISMS.has(hop.mechanism);
   return isRedirect(hop.status);
 }
@@ -157,7 +172,7 @@ export function normalizeUrl(input: string): string {
   return `https://${trimmed}`;
 }
 
-export function diffParams(from: RedirectHop, to: RedirectHop): HopParamDiff {
+function diffParams(from: RedirectHop, to: RedirectHop): HopParamDiff {
   const changes: ParamChange[] = [];
   const keys = new Set([...Object.keys(from.params), ...Object.keys(to.params)]);
   for (const key of Array.from(keys).sort()) {
@@ -201,7 +216,7 @@ function normalizeComparableUrl(raw: string): string {
   }
 }
 
-export function buildIssues(
+function buildIssues(
   hops: RedirectHop[],
   opts: {
     redirectLoop: boolean;
@@ -302,7 +317,7 @@ export function buildIssues(
         id: `server-error-${hop.index}`,
         level: "error",
         title: `${hop.status} server error`,
-        detail: `${hop.url} responded with ${hop.status} ${hop.statusText}.`,
+        detail: `${hop.url} responded with ${hop.status} ${hop.statusText}${hop.blockedReason ? ` — ${hop.blockedReason}` : "."}`,
         hopIndex: hop.index,
       });
     } else if (hop.status >= 400 && hop.mechanism !== "gateway-unwrap") {
@@ -310,7 +325,7 @@ export function buildIssues(
         id: `client-error-${hop.index}`,
         level: "error",
         title: `${hop.status} client error`,
-        detail: `${hop.url} responded with ${hop.status} ${hop.statusText}.`,
+        detail: `${hop.url} responded with ${hop.status} ${hop.statusText}${hop.blockedReason ? ` — ${hop.blockedReason}` : "."}`,
         hopIndex: hop.index,
       });
     }

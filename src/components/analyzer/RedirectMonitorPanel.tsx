@@ -71,9 +71,10 @@ export function RedirectMonitorPanel({ activeResults }: { activeResults: Redirec
 
   function handlePinActiveResult(analysis: RedirectAnalysis) {
     const existing = monitors.find((m) => m.startUrl === analysis.startUrl);
+    const resolvedWebhook = webhookUrl.trim() || existing?.webhookUrl;
     const baseline = createBaselineFromAnalysis(analysis, {
       intervalMinutes: Number(intervalMinutes) as 15 | 60 | 360 | 1440,
-      webhookUrl: webhookUrl.trim() || existing?.webhookUrl,
+      ...(resolvedWebhook !== undefined ? { webhookUrl: resolvedWebhook } : {}),
     });
     const next = [baseline, ...monitors.filter((m) => m.startUrl !== analysis.startUrl)].slice(
       0,
@@ -93,12 +94,13 @@ export function RedirectMonitorPanel({ activeResults }: { activeResults: Redirec
       if (!live) throw new Error("No trace response returned");
 
       const verdict = evaluateRedirectDrift(monitor, live);
+      const resolvedWebhook = webhookUrl.trim() || monitor.webhookUrl;
       const updated: MonitoredRedirectBaseline = {
         ...monitor,
         lastCheckedAt: verdict.checkedAt,
         lastStatus: verdict.status,
         lastDriftSummary: verdict.summary,
-        webhookUrl: webhookUrl.trim() || monitor.webhookUrl,
+        ...(resolvedWebhook !== undefined ? { webhookUrl: resolvedWebhook } : {}),
       };
 
       const next = monitors.map((m) => (m.id === monitor.id ? updated : m));

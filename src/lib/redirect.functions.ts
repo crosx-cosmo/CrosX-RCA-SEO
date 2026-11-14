@@ -45,10 +45,17 @@ async function traceWithProtection(
       coalesceInFlight,
       extractClientFingerprint,
       extractClientIp,
+      inspectIncomingRequest,
     },
   ] = await Promise.all([import("./trace-engine.server"), import("./security.server")]);
 
   const req = safeGetRequest();
+  if (req) {
+    const waf = inspectIncomingRequest(req);
+    if (!waf.ok) {
+      throw new Error(waf.reason ?? "Request blocked by security policy.");
+    }
+  }
   const ip = extractClientIp(req);
   const fp = extractClientFingerprint(req);
 
@@ -121,10 +128,17 @@ export const compareRedirectAgents = createServerFn({ method: "POST" })
         coalesceInFlight,
         extractClientFingerprint,
         extractClientIp,
+        inspectIncomingRequest,
       },
     ] = await Promise.all([import("./trace-engine.server"), import("./security.server")]);
 
     const req = safeGetRequest();
+    if (req) {
+      const waf = inspectIncomingRequest(req);
+      if (!waf.ok) {
+        throw new Error(waf.reason ?? "Request blocked by security policy.");
+      }
+    }
     const ip = extractClientIp(req);
     const fp = extractClientFingerprint(req);
 

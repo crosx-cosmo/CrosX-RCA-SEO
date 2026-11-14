@@ -63,6 +63,7 @@ interface PwPage {
   url: () => string;
   waitForTimeout: (ms: number) => Promise<void>;
   waitForLoadState: (state: string, opts: { timeout: number }) => Promise<void>;
+  evaluate: <T>(fn: () => T) => Promise<T>;
   content: () => Promise<string>;
 }
 
@@ -131,6 +132,7 @@ async function traceWithLocalChromium(
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--disable-extensions",
+        "--disable-blink-features=AutomationControlled",
       ],
     });
 
@@ -142,14 +144,22 @@ async function traceWithLocalChromium(
       javaScriptEnabled: true,
     });
 
-    // Accelerate long countdown timers (e.g. 5s/10s interstitial timers -> 60ms)
-    // and redirect window.open() calls into main-frame navigation so popup redirects are captured.
+    // Accelerate long countdown timers (e.g. 5s/10s interstitial timers -> 60ms),
+    // mask webdriver fingerprint, and redirect window.open() calls into main-frame navigation.
     await context.addInitScript(`
       (() => {
+        try {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        } catch {}
         const origSetTimeout = window.setTimeout;
         window.setTimeout = function(fn, delay, ...args) {
           const capped = typeof delay === 'number' && delay > 150 ? 60 : delay;
           return origSetTimeout.call(window, fn, capped, ...args);
+        };
+        const origSetInterval = window.setInterval;
+        window.setInterval = function(fn, delay, ...args) {
+          const capped = typeof delay === 'number' && delay > 150 ? 60 : delay;
+          return origSetInterval.call(window, fn, capped, ...args);
         };
         window.open = function(targetUrl) {
           if (typeof targetUrl === 'string' && targetUrl.trim()) {
@@ -250,12 +260,33 @@ async function traceWithLocalChromium(
 
     // Give accelerated timers / JS redirects / meta refresh a moment to settle
     const initialUrl = page.url();
-    for (let step = 0; step < 6; step++) {
-      await page.waitForTimeout(220).catch(() => {});
+    let triedClick = false;
+    for (let step = 0; step < 10; step++) {
+      await page.waitForTimeout(240).catch(() => {});
       if (page.url() !== initialUrl && page.url() !== url) {
         // Wait briefly for the new page to settle
         await page.waitForLoadState("domcontentloaded", { timeout: 2500 }).catch(() => {});
         break;
+      }
+      // On thin interstitial / skip-ad / auto-gate pages, trigger click on obvious proceed elements
+      if (step === 2 && !triedClick) {
+        triedClick = true;
+        await page
+          .evaluate(() => {
+            const doc = globalThis as unknown as {
+              document?: {
+                body?: { innerText?: string };
+                querySelector?: (s: string) => { click?: () => void } | null;
+              };
+            };
+            const bodyLen = doc.document?.body?.innerText?.trim().length ?? 0;
+            if (bodyLen > 900) return;
+            const target = doc.document?.querySelector?.(
+              '#skip, #continue, #redirect, [data-redirect], [data-redirect-url], a[id*="redirect" i], a[class*="continue" i], button[type="submit"]',
+            );
+            target?.click?.();
+          })
+          .catch(() => {});
       }
     }
 
@@ -309,9 +340,30 @@ export async function traceWithBrowser(
   timeoutMs: number,
   userAgent?: string,
 ): Promise<BrowserTraceResult> {
+  const initialSafety = await assertSafeUrl(url, Math.min(3500, timeoutMs));
+  if (!initialSafety.ok) {
+    return {
+      ok: false,
+      reason: initialSafety.reason ?? "Blocked unsafe initial browser URL.",
+      finalUrl: null,
+      navigations: [],
+      elapsedMs: 0,
+    };
+  }
+
   // 1. Try local sandboxed Chromium first (fast, zero external token needed)
   const localResult = await traceWithLocalChromium(url, timeoutMs, userAgent);
-  if (localResult && localResult.ok) {
+  if (localResult && localResult.ok && localResult.finalUrl) {
+    const finalSafety = await assertSafeUrl(localResult.finalUrl, 3000);
+    if (!finalSafety.ok) {
+      return {
+        ok: false,
+        reason: finalSafety.reason ?? "Blocked unsafe browser redirect destination.",
+        finalUrl: localResult.finalUrl,
+        navigations: localResult.navigations,
+        elapsedMs: localResult.elapsedMs,
+      };
+    }
     return localResult;
   }
 
@@ -375,6 +427,16 @@ export async function traceWithBrowser(
         reason: "The headless browser returned no final URL for this page.",
         finalUrl: null,
         navigations: [],
+        elapsedMs: Date.now() - started,
+      };
+    }
+    const finalSafety = await assertSafeUrl(finalUrl, 3000);
+    if (!finalSafety.ok) {
+      return {
+        ok: false,
+        reason: finalSafety.reason ?? "Blocked unsafe browser redirect destination.",
+        finalUrl,
+        navigations: payload.data?.navigations ?? [],
         elapsedMs: Date.now() - started,
       };
     }

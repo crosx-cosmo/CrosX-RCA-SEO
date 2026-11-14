@@ -5,8 +5,17 @@ export function toJson(results: RedirectAnalysis[]): string {
   return JSON.stringify(results.length === 1 ? results[0] : results, null, 2);
 }
 
-function csvCell(value: unknown): string {
-  const s = value === null || value === undefined ? "" : String(value);
+export function sanitizeCsvFormula(raw: string): string {
+  if (!raw) return "";
+  // Prevent CSV Formula / DDE Injection (=, +, -, @, tab, CR) unless it is a plain negative number
+  if (/^[=+\-@\t\r]/.test(raw) && !/^-\d+(\.\d+)?$/.test(raw)) {
+    return `'${raw}`;
+  }
+  return raw;
+}
+
+export function csvCell(value: unknown): string {
+  const s = value === null || value === undefined ? "" : sanitizeCsvFormula(String(value));
   return `"${s.replace(/"/g, '""')}"`;
 }
 

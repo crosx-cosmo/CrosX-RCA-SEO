@@ -27,16 +27,18 @@ const page = (status: number, msg: string) =>
     },
   );
 
-let ephemeralSaltBytes: Uint8Array | null = null;
+let ephemeralSaltBytes: Uint8Array<ArrayBuffer> | null = null;
 
-function getVisitorSaltBytes(): Uint8Array {
+function getVisitorSaltBytes(): Uint8Array<ArrayBuffer> {
   const envSalt =
     typeof process !== "undefined" ? process.env["VISITOR_HASH_SALT"]?.trim() : undefined;
   if (envSalt) {
-    return new TextEncoder().encode(envSalt);
+    const encoded = new TextEncoder().encode(envSalt);
+    return new Uint8Array(encoded);
   }
   if (!ephemeralSaltBytes) {
-    ephemeralSaltBytes = crypto.getRandomValues(new Uint8Array(32));
+    const buf = new Uint8Array(new ArrayBuffer(32));
+    ephemeralSaltBytes = crypto.getRandomValues(buf);
   }
   return ephemeralSaltBytes;
 }

@@ -68,7 +68,7 @@ const HIGH_RISK_TLDS = new Set([
   "rest",
   "fit",
   "icu",
-  " monster",
+  "monster",
 ]);
 
 const PROTECTED_BRANDS: Array<{ brand: string; officialDomains: string[]; patterns: RegExp[] }> = [

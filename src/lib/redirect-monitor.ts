@@ -70,7 +70,7 @@ export function createBaselineFromAnalysis(
     expectedKeptParams: [...analysis.tracking.keptTrackingParams],
     baselineLatencyMs: analysis.totalResponseTimeMs,
     intervalMinutes: options?.intervalMinutes ?? 60,
-    webhookUrl: options?.webhookUrl?.trim() || undefined,
+    ...(options?.webhookUrl?.trim() ? { webhookUrl: options.webhookUrl.trim() } : {}),
     createdAt: new Date().toISOString(),
     lastCheckedAt: analysis.analyzedAt || new Date().toISOString(),
     lastStatus: "healthy",

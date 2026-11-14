@@ -237,7 +237,7 @@ function extractBaseIp(clientKey: string): string {
 }
 
 /** Records a WAF violation strike against an IP and triggers automatic quarantine on repeat attacks. */
-export function recordWafStrike(ip: string, reason: string, now = Date.now()): QuarantineRecord {
+function recordWafStrike(ip: string, reason: string, now = Date.now()): QuarantineRecord {
   if (!ip || ip === "local" || ip === "anonymous") {
     return { strikes: 1, blockedUntil: 0, lastReason: reason, lastSeen: now };
   }

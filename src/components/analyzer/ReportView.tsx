@@ -1,13 +1,17 @@
 import {
+  ArrowRight,
   CalendarClock,
   Download,
+  ExternalLink,
   FileCheck2,
   FileCode2,
   FileJson,
   FileText,
   Link2,
+  Smartphone,
   TriangleAlert,
 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -24,9 +28,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { downloadFile, toJson, toReport, toSeoAuditCsv } from "@/lib/redirect-export";
 import { toFlowchartSvg, toHar } from "@/lib/redirect-har";
-import type { RedirectAnalysis } from "@/lib/redirect-types";
+import type { RedirectAnalysis, UserAgentPreset } from "@/lib/redirect-types";
 import { ChainTab } from "./ChainTab";
 import { CloakingMatrixPanel } from "./CloakingMatrixPanel";
 import { CopyButton } from "./CopyButton";
@@ -103,12 +108,23 @@ function slug(url: string) {
 export function ReportView({
   result,
   shareId,
+  onRetryTrace,
 }: {
   result: RedirectAnalysis;
   shareId?: string | undefined;
+  onRetryTrace?: (url: string, userAgent?: UserAgentPreset) => void;
 }) {
+  const [continuationUrl, setContinuationUrl] = useState("");
   const analyzedAt = formatDate(result.analyzedAt);
   const base = `crosx-redirect-report-${slug(result.startUrl)}`;
+  const lastHop = result.hops[result.hops.length - 1];
+  const isUpstreamGate =
+    result.finalDestinationConfirmed === false &&
+    Boolean(lastHop) &&
+    (lastHop!.status === 403 ||
+      lastHop!.status === 406 ||
+      lastHop!.status === 429 ||
+      lastHop!.status === 503);
 
   function download(kind: "txt" | "json" | "seo-csv" | "har" | "svg") {
     if (kind === "txt") {
@@ -232,13 +248,94 @@ export function ReportView({
         ) : null}
 
         {result.finalDestinationConfirmed === false && result.terminationDetail ? (
-          <p className="flex min-w-0 items-start gap-1.5 rounded-xl border border-warning/35 bg-warning/10 px-3 py-2.5 text-[12px] text-warning-foreground">
-            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-            <span className="min-w-0">
-              <span className="font-semibold">Trace stopped early — </span>
-              {result.terminationDetail}
-            </span>
-          </p>
+          <div className="space-y-3 rounded-xl border border-warning/35 bg-warning/10 px-3.5 py-3 text-[12px] text-warning-foreground">
+            <div className="flex min-w-0 items-start gap-2">
+              <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+              <div className="min-w-0 flex-1 space-y-1">
+                <p>
+                  <span className="font-semibold">Trace stopped early — </span>
+                  {result.terminationDetail}
+                </p>
+                {isUpstreamGate ? (
+                  <p className="text-[11px] opacity-90">
+                    The target host rejected our cloud server node&apos;s IP or device profile.
+                    Retry with a mobile browser profile below, or open the blocked hop on your own
+                    device network and paste the landed URL to continue tracing.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+
+            {isUpstreamGate && lastHop ? (
+              <div className="space-y-2.5 border-t border-warning/25 pt-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  {onRetryTrace ? (
+                    <>
+                      <Button
+                        type="button"
+                        variant="subtle"
+                        size="sm"
+                        className="h-7 px-2.5 text-[11px]"
+                        onClick={() => onRetryTrace(result.startUrl, "mobile-android")}
+                      >
+                        <Smartphone className="size-3" />
+                        Retry as Android Chrome
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="subtle"
+                        size="sm"
+                        className="h-7 px-2.5 text-[11px]"
+                        onClick={() => onRetryTrace(result.startUrl, "mobile-iphone")}
+                      >
+                        <Smartphone className="size-3" />
+                        Retry as iPhone iOS
+                      </Button>
+                    </>
+                  ) : null}
+                  {/^https?:\/\//i.test(lastHop.url) ? (
+                    <Button asChild variant="outline" size="sm" className="h-7 px-2.5 text-[11px]">
+                      <a href={lastHop.url} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink className="size-3" />
+                        Open hop on your network
+                      </a>
+                    </Button>
+                  ) : null}
+                </div>
+
+                {onRetryTrace ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const trimmed = continuationUrl.trim();
+                      if (!trimmed) return;
+                      onRetryTrace(trimmed, result.userAgentPreset ?? "mobile-android");
+                      setContinuationUrl("");
+                    }}
+                    className="flex flex-col gap-2 sm:flex-row"
+                  >
+                    <Input
+                      value={continuationUrl}
+                      onChange={(e) => setContinuationUrl(e.target.value)}
+                      placeholder="Paste final/next URL from your browser to continue tracing..."
+                      aria-label="Paste destination URL to continue tracing"
+                      className="h-8 flex-1 bg-background/90 font-mono text-[11.5px] text-foreground"
+                    />
+                    <Button
+                      type="submit"
+                      variant="default"
+                      size="sm"
+                      disabled={!continuationUrl.trim()}
+                      className="h-8 shrink-0 px-3 text-[11.5px]"
+                    >
+                      Continue trace
+                      <ArrowRight className="size-3" />
+                    </Button>
+                  </form>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
         {result.error ? (

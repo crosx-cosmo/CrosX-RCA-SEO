@@ -157,13 +157,13 @@ export function SeoTab({ result }: { result: RedirectAnalysis }) {
           index={3}
           label="Canonical URL"
           value={seo.canonical ?? "not found"}
-          copyValue={seo.canonical ?? undefined}
+          {...(seo.canonical ? { copyValue: seo.canonical } : {})}
         />
         <Row
           index={4}
           label="Canonical alignment"
           value={canonicalStatusLabel}
-          tone={canonicalStatusTone}
+          {...(canonicalStatusTone ? { tone: canonicalStatusTone } : {})}
         />
         <Row
           index={5}
@@ -175,7 +175,7 @@ export function SeoTab({ result }: { result: RedirectAnalysis }) {
           index={6}
           label="X-Robots-Tag HTTP header"
           value={seo.xRobotsTag ?? "not set"}
-          tone={seo.xRobotsTag?.toLowerCase().includes("noindex") ? "bad" : undefined}
+          {...(seo.xRobotsTag?.toLowerCase().includes("noindex") ? { tone: "bad" as const } : {})}
         />
         <Row
           index={7}

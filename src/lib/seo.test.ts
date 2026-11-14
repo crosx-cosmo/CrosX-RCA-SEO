@@ -128,6 +128,9 @@ test("redirect-analysis normalizeUrl, stripTrackingParams, USER_AGENT_PRESETS an
       headers: { location: "https://example.com/landing?utm_source=news" },
       protocol: "http" as const,
       params: { utm_source: "news", aff_id: "42" },
+      redirectType: "Permanent Redirect",
+      server: null,
+      ip: null,
       mechanism: "http-redirect" as const,
     },
     {
@@ -145,6 +148,9 @@ test("redirect-analysis normalizeUrl, stripTrackingParams, USER_AGENT_PRESETS an
       },
       protocol: "https" as const,
       params: { utm_source: "news" },
+      redirectType: "Success",
+      server: null,
+      ip: null,
       mechanism: "final-response" as const,
     },
   ];
@@ -329,12 +335,12 @@ test("generateServerRedirectRules, evaluateCloakingMatrix, gradeSeoAnalysis, app
   const desktopReport = buildDemoAnalysis("https://example.com/offer");
   const mobileReport = {
     ...desktopReport,
-    userAgentPreset: "mobile-safari",
-    userAgentLabel: "Mobile Safari (iPhone)",
+    userAgentPreset: "mobile-iphone" as const,
+    userAgentLabel: "Mobile Safari (iPhone iOS)",
   };
   const cloakedBotReport = {
     ...desktopReport,
-    userAgentPreset: "googlebot-smartphone",
+    userAgentPreset: "googlebot-smartphone" as const,
     userAgentLabel: "Googlebot Smartphone",
     finalUrl: "https://example.com/seo-landing-page",
     seo: {
@@ -635,4 +641,99 @@ test("enterprise suite: Threat Scanner, HAR/SVG Exporter, Sitemap/.htaccess/Ngin
   });
   assert.equal(hitA?.destination, "https://rca.crosx.in/?variant=a");
   assert.equal(hitB?.destination, "https://rca.crosx.in/?variant=b");
+});
+
+test("universal hidden redirect detectors, clean browser Client Hints, JSON redirects, and upstream block reason extraction", async () => {
+  const {
+    detectClientRedirect,
+    extractJsonRedirectTarget,
+    extractUpstreamBlockReason,
+    isOsOrDeviceRejectionMessage,
+  } = await import("./trace-detect");
+  const { buildHopRequestHeaders } = await import("./trace-engine.server");
+
+  // 1. Clean browser UAs without bot fingerprint suffixes + matching Sec-CH-UA Client Hints
+  assert.equal(USER_AGENT_PRESETS["desktop-chrome"].ua.includes("RedirectChainAnalyzer"), false);
+  assert.equal(USER_AGENT_PRESETS["mobile-android"].ua.includes("RedirectChainAnalyzer"), false);
+  assert.equal(USER_AGENT_PRESETS["mobile-iphone"].ua.includes("RedirectChainAnalyzer"), false);
+
+  const androidHeaders = buildHopRequestHeaders(
+    "mobile-android",
+    "sid=abc",
+    "https://ref.example.com/",
+  );
+  assert.equal(androidHeaders["sec-ch-ua-mobile"], "?1");
+  assert.equal(androidHeaders["sec-ch-ua-platform"], '"Android"');
+  assert.equal(androidHeaders["cookie"], "sid=abc");
+  assert.equal(androidHeaders["referer"], "https://ref.example.com/");
+
+  // 2. JSON API redirect & nested data payloads
+  const flatJson = extractJsonRedirectTarget('{"ok":true,"url":"https://rca.crosx.in/json-hop"}');
+  assert.equal(flatJson?.url, "https://rca.crosx.in/json-hop");
+  assert.equal(flatJson?.keyPath, "url");
+
+  const nestedJson = extractJsonRedirectTarget(
+    '{"status":"success","data":{"result":{"redirectUrl":"https://rca.crosx.in/deep-json"}}}',
+  );
+  assert.equal(nestedJson?.url, "https://rca.crosx.in/deep-json");
+  assert.equal(nestedJson?.keyPath, "data.result.redirectUrl");
+
+  // 3. Upstream block reason extraction & OS-gate vs VPN/proxy classification
+  const vpnMsg = extractUpstreamBlockReason(
+    '{"status":"failed","message":"Access not allowed through a VPN or proxy"}',
+  );
+  assert.equal(vpnMsg, "Access not allowed through a VPN or proxy");
+  assert.equal(isOsOrDeviceRejectionMessage(vpnMsg), false);
+
+  const osMsg = extractUpstreamBlockReason(
+    '{"status":"failed","message":"Access not allowed for your operating system"}',
+  );
+  assert.equal(osMsg, "Access not allowed for your operating system");
+  assert.equal(isOsOrDeviceRejectionMessage(osMsg), true);
+
+  // 4. ['h','t','t','p',...].join('') array de-obfuscation + template literal
+  const arrayJoinHtml = `
+    <html><head><script>
+      const dest = ['h','t','t','p','s',':','/','/','rca.crosx.in','/arr'].join('');
+      globalThis.location.replace(dest);
+    </script></head></html>
+  `;
+  const arrRes = detectClientRedirect(arrayJoinHtml);
+  assert.equal(arrRes.signal?.rawTarget, "https://rca.crosx.in/arr");
+
+  // 5. Numeric decimal/hex HTML entities in meta refresh
+  const entityRefresh = `
+    <html><head>
+      <meta http-equiv="refresh" content="0;url=&#104;&#116;&#116;&#112;s&#58;//rca.crosx.in/entity?a=1&amp;b=2" />
+    </head></html>
+  `;
+  const entRes = detectClientRedirect(entityRefresh);
+  assert.equal(entRes.signal?.rawTarget, "https://rca.crosx.in/entity?a=1&b=2");
+
+  // 6. DOM getElementById('go').click() in VM sandbox + cloaked thin iframe forwarder
+  const autoClickHtml = `
+    <html><body>
+      <a id="go-link" href="https://rca.crosx.in/auto-clicked">Continue</a>
+      <script>document.getElementById('go-link').click();</script>
+    </body></html>
+  `;
+  const clickRes = detectClientRedirect(autoClickHtml, "https://gate.example.com/");
+  assert.equal(clickRes.signal?.rawTarget, "https://rca.crosx.in/auto-clicked");
+
+  const cloakedIframeHtml = `
+    <html><body style="margin:0">
+      <iframe src="https://rca.crosx.in/cloaked-frame" style="width:100%;height:100vh"></iframe>
+    </body></html>
+  `;
+  const iframeRes = detectClientRedirect(cloakedIframeHtml, "https://cloak.example.com/");
+  assert.equal(iframeRes.signal?.rawTarget, "https://rca.crosx.in/cloaked-frame");
+
+  // 7. <meta property="al:web:url"> AppLinks fallback
+  const appLinksHtml = `
+    <html><head>
+      <meta property="al:web:url" content="https://rca.crosx.in/applink-fallback" />
+    </head><body>Opening app...</body></html>
+  `;
+  const appRes = detectClientRedirect(appLinksHtml);
+  assert.equal(appRes.signal?.rawTarget, "https://rca.crosx.in/applink-fallback");
 });

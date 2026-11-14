@@ -32,9 +32,11 @@ import { ShortLinkQr } from "@/components/ShortLinkQr";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { CROSX_LOGO_URL } from "@/lib/brand";
 import type { LinkRule } from "@/lib/link-rules";
+import { csvCell } from "@/lib/redirect-export";
 import { applyUtmParameters } from "@/lib/redirect-rules-codegen";
 import { scanRedirectThreats } from "@/lib/threat-scanner";
 import {
@@ -112,7 +114,6 @@ function exportCsv(rows: ShortLink[], origin: string) {
     "last_clicked_at",
     "expires_at",
   ];
-  const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
   const lines = rows.map((l) =>
     [
       l.slug,
@@ -124,10 +125,10 @@ function exportCsv(rows: ShortLink[], origin: string) {
       l.last_clicked_at ?? "",
       l.expires_at ?? "",
     ]
-      .map(esc)
+      .map(csvCell)
       .join(","),
   );
-  const blob = new Blob([header.join(",") + "\n" + lines.join("\n")], {
+  const blob = new Blob([header.map(csvCell).join(",") + "\n" + lines.join("\n")], {
     type: "text/csv;charset=utf-8",
   });
   const a = document.createElement("a");
@@ -212,6 +213,8 @@ function LinksPage() {
             params: Object.fromEntries(parsed.searchParams.entries()),
             redirectType: "200 Final",
             mechanism: "final-response",
+            server: null,
+            ip: null,
           },
         ],
         seo: {
@@ -226,8 +229,11 @@ function LinksPage() {
           lostTrackingParams: [],
           keptTrackingParams: [],
           diffs: [],
+          startParams: {},
+          finalParams: {},
         },
         source: "live",
+        error: null,
         analyzedAt: new Date().toISOString(),
       });
     } catch {
@@ -533,7 +539,16 @@ function LinksPage() {
           </p>
         </form>
 
-        {all.length > 0 && (
+        {!owner || links.isLoading ? (
+          <div aria-hidden="true" className="grid grid-cols-3 gap-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="panel flex flex-col items-center p-3 sm:p-4">
+                <Skeleton className="h-7 w-12 rounded-md" />
+                <Skeleton className="mt-1.5 h-3 w-16 rounded-full" />
+              </div>
+            ))}
+          </div>
+        ) : all.length > 0 ? (
           <div className="grid grid-cols-3 gap-3">
             {[
               { label: "Total links", value: all.length },
@@ -548,7 +563,7 @@ function LinksPage() {
               </div>
             ))}
           </div>
-        )}
+        ) : null}
 
         <section className="panel animate-rise p-4 sm:p-6">
           <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -611,8 +626,36 @@ function LinksPage() {
             )}
           </div>
 
-          {links.isLoading ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+          {!owner || links.isLoading ? (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label="Loading short links"
+              data-testid="links-skeleton"
+              className="divide-y divide-hairline"
+            >
+              {[0, 1, 2].map((i) => (
+                <div
+                  key={i}
+                  className="flex flex-col gap-3 py-3.5 first:pt-1 last:pb-1 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="h-4 w-28 rounded-md" />
+                      <Skeleton className="size-6 rounded-md" />
+                      <Skeleton className="h-4 w-16 rounded-full" />
+                    </div>
+                    <Skeleton className="h-3.5 w-4/5 rounded-md sm:w-2/3" />
+                    <Skeleton className="h-3 w-56 rounded-full" />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {Array.from({ length: 6 }).map((_, idx) => (
+                      <Skeleton key={idx} className="size-8 rounded-md" />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : links.isError ? (
             <p className="py-6 text-center text-sm text-destructive">
               {(links.error as Error).message}
@@ -663,7 +706,9 @@ function LinksPage() {
                                 : ""}
                             </span>
                           )}
-                          {health && (
+                          {checkingHealth && !health ? (
+                            <Skeleton className="h-4 w-24 rounded-full" />
+                          ) : health ? (
                             <span
                               className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold ${
                                 health.ok
@@ -675,7 +720,7 @@ function LinksPage() {
                               {health.status ?? "ERR"} {health.ok ? "OK" : health.statusText} ·{" "}
                               {health.latencyMs}ms
                             </span>
-                          )}
+                          ) : null}
                         </div>
                         <p className="truncate font-mono text-[11.5px] text-muted-foreground">
                           {l.destination}

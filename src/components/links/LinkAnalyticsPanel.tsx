@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Bot, Download, Loader2, MousePointerClick, Shuffle, Users } from "lucide-react";
+import { Bot, Download, MousePointerClick, Shuffle, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { LinkRule } from "@/lib/link-rules";
+import { csvCell } from "@/lib/redirect-export";
 import { exportLinkClicks, getLinkAnalytics, type Bucket } from "@/lib/shortlinks.functions";
 
 const RANGES = [
@@ -82,12 +84,15 @@ export function LinkAnalyticsPanel({
   async function download() {
     try {
       const rows = await exp({ data: { id, owner, ...window } });
-      if (!rows.length) return toast.info("No clicks in this range");
+      if (!rows.length) {
+        toast.info("No clicks in this range");
+        return;
+      }
       const cols = Object.keys(rows[0]!);
-      const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join(
-        "\n",
-      );
+      const csv = [
+        cols.map(csvCell).join(","),
+        ...rows.map((r) => cols.map((c) => csvCell(r[c])).join(",")),
+      ].join("\n");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
       a.download = `clicks-${slug}-${days}d.csv`;
@@ -117,7 +122,15 @@ export function LinkAnalyticsPanel({
   }, [d?.recent, ruleNameMap]);
 
   return (
-    <div className="animate-reveal space-y-3 rounded-xl border border-hairline bg-surface-muted/40 p-3 sm:p-4">
+    <div className="animate-reveal relative space-y-3 overflow-hidden rounded-xl border border-hairline bg-surface-muted/40 p-3 sm:p-4">
+      {q.isFetching && !q.isLoading ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 h-0.5 overflow-hidden bg-brand/15"
+        >
+          <div className="animate-shimmer h-full w-full bg-brand/50" />
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1 rounded-lg border border-hairline p-0.5">
           {RANGES.map((r) => (
@@ -141,10 +154,62 @@ export function LinkAnalyticsPanel({
       </div>
 
       {q.isLoading ? (
-        <div className="grid gap-2 sm:grid-cols-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-16 animate-pulse rounded-xl bg-muted" />
-          ))}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Loading link analytics"
+          data-testid="analytics-skeleton"
+          className="space-y-3"
+        >
+          <div className="grid grid-cols-3 gap-2">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rounded-xl border border-hairline bg-surface/60 p-3">
+                <Skeleton className="size-4 rounded-md" />
+                <Skeleton className="mt-2 h-6 w-12 rounded-md" />
+                <Skeleton className="mt-1.5 h-3 w-20 rounded-full" />
+              </div>
+            ))}
+          </div>
+          <div className="rounded-xl border border-hairline bg-surface/60 p-3">
+            <Skeleton className="mb-3 h-3 w-36 rounded-full" />
+            <div className="flex h-24 items-end gap-1.5">
+              {[32, 58, 44, 80, 62, 92, 48, 70, 86, 54, 64, 40].map((pct, i) => (
+                <Skeleton
+                  key={i}
+                  className="flex-1 rounded-t-md rounded-b-none"
+                  style={{ height: `${pct}%` }}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="space-y-2 rounded-xl border border-hairline bg-surface/60 p-3"
+              >
+                <Skeleton className="h-3 w-24 rounded-full" />
+                {[0, 1, 2].map((row) => (
+                  <div key={row} className="space-y-1">
+                    <div className="flex justify-between gap-2">
+                      <Skeleton className="h-3 w-24 rounded-md" />
+                      <Skeleton className="h-3 w-8 rounded-md" />
+                    </div>
+                    <Skeleton className="h-1 w-full rounded-full" />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="space-y-2 rounded-xl border border-hairline bg-surface/60 p-3">
+            <Skeleton className="h-3 w-28 rounded-full" />
+            {[0, 1, 2].map((row) => (
+              <div key={row} className="flex justify-between gap-3 py-1">
+                <Skeleton className="h-3 w-32 rounded-md" />
+                <Skeleton className="h-3 w-40 rounded-md" />
+              </div>
+            ))}
+          </div>
         </div>
       ) : q.error ? (
         <p className="text-sm text-destructive">{(q.error as Error).message}</p>
@@ -250,9 +315,6 @@ export function LinkAnalyticsPanel({
             never stored.
           </p>
         </>
-      ) : null}
-      {q.isFetching && !q.isLoading ? (
-        <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
       ) : null}
     </div>
   );

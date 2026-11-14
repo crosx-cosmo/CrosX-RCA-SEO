@@ -361,6 +361,13 @@ function AnalyzerPage() {
                 key={`${result.startUrl}-${result.analyzedAt}`}
                 result={result}
                 shareId={shareIds[analysisKey(result)]}
+                onRetryTrace={(nextUrl, ua) => {
+                  setInitialUrl(nextUrl);
+                  mutation.mutate({
+                    urls: [nextUrl],
+                    userAgent: ua ?? result.userAgentPreset ?? "mobile-android",
+                  });
+                }}
               />
             ))
           : null}

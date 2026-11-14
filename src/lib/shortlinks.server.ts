@@ -57,6 +57,8 @@ export interface ShortLinkDatabaseClient {
 const STORE_FILE_PATH = resolve(process.cwd(), ".data", "shortlinks-store.json");
 const UPSTREAM_CIRCUIT_COOLDOWN_MS = 60_000;
 const UPSTREAM_TIMEOUT_MS = 3_500;
+const MAX_LOCAL_LINKS = 5_000;
+const MAX_LOCAL_CLICKS = 25_000;
 
 let memoryStore: LocalShortLinkStoreData | null = null;
 let upstreamCooldownUntil = 0;
@@ -164,6 +166,9 @@ export function executeLocalShortLinkRpc(
         owner_hash: slHash(pOwner),
       };
       store.links.unshift(created);
+      if (store.links.length > MAX_LOCAL_LINKS) {
+        store.links.length = MAX_LOCAL_LINKS;
+      }
       saveLocalStore(store);
       return { data: toPublicLink(created), error: null };
     }
@@ -304,6 +309,9 @@ export function executeLocalShortLinkRpc(
         is_bot: Boolean(args["p_is_bot"]),
         rule_id: args["p_rule"] != null ? String(args["p_rule"]).slice(0, 64) : null,
       });
+      if (store.clicks.length > MAX_LOCAL_CLICKS) {
+        store.clicks.length = MAX_LOCAL_CLICKS;
+      }
       saveLocalStore(store);
       return { data: null, error: null };
     }

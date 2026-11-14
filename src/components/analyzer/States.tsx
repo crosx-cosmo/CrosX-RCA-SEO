@@ -20,15 +20,22 @@ const SEO_AUDIT_LOADING_ROWS = [
   "Tracking parameter diff & clean URL extraction",
 ] as const;
 
+const ACCORDION_PREVIEW_SECTIONS = [
+  "Visual redirect graph & HAR export",
+  "Phishing, malware & threat intelligence scanner",
+  "Server redirect rules & cloaking check",
+] as const;
+
 export function LoadingState({
   urls,
   userAgentLabel,
 }: {
-  urls?: string[];
-  userAgentLabel?: string;
+  urls?: string[] | undefined;
+  userAgentLabel?: string | undefined;
 } = {}) {
   const primaryUrl = urls?.[0];
-  const extraCount = urls && urls.length > 1 ? urls.length - 1 : 0;
+  const totalUrls = urls?.length ?? 0;
+  const extraCount = totalUrls > 1 ? totalUrls - 1 : 0;
 
   return (
     <section
@@ -36,13 +43,15 @@ export function LoadingState({
       aria-live="polite"
       aria-busy="true"
       aria-label="Analyzing redirect chain and SEO signals"
+      data-testid="analysis-skeleton"
       className="panel animate-reveal relative space-y-5 overflow-hidden p-4 sm:p-6"
     >
       {/* Top shimmer progress bar */}
       <div className="pointer-events-none absolute inset-x-0 top-0 h-1 overflow-hidden bg-brand/15">
-        <div className="animate-shimmer h-full w-full bg-brand/40" />
+        <div className="animate-shimmer h-full w-full bg-brand/45" />
       </div>
 
+      {/* Header bar with live URL + User-Agent pill + Export action skeletons */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <span className="animate-pulse-ring grid size-8 shrink-0 place-items-center rounded-full bg-brand/12">
@@ -50,7 +59,9 @@ export function LoadingState({
           </span>
           <div className="min-w-0">
             <p className="text-sm font-semibold text-foreground">
-              Tracing redirect hops &amp; auditing SEO signals…
+              {totalUrls > 1
+                ? `Tracing ${totalUrls} redirect chains & auditing SEO signals…`
+                : "Tracing redirect hops & auditing SEO signals…"}
             </p>
             <p className="truncate font-mono text-xs text-muted-foreground">
               {primaryUrl
@@ -59,12 +70,31 @@ export function LoadingState({
             </p>
           </div>
         </div>
-        {userAgentLabel ? (
-          <span className="animate-shimmer inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border border-hairline bg-surface-muted px-3 py-1 font-mono text-[11px] font-medium text-muted-foreground">
-            <Globe className="size-3 text-brand" />
-            {userAgentLabel}
-          </span>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {userAgentLabel ? (
+            <span className="animate-shimmer inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border border-hairline bg-surface-muted px-3 py-1 font-mono text-[11px] font-medium text-muted-foreground">
+              <Globe className="size-3 text-brand" />
+              {userAgentLabel}
+            </span>
+          ) : null}
+          <Skeleton className="hidden h-7 w-20 rounded-lg sm:block" />
+          <Skeleton className="hidden h-7 w-24 rounded-lg sm:block" />
+        </div>
+      </div>
+
+      {/* Verdict banner skeleton matching ReportView destination strip */}
+      <div className="flex flex-col justify-between gap-3 rounded-xl border border-hairline bg-surface-muted/70 p-3.5 sm:flex-row sm:items-center">
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-5 w-24 rounded-full" />
+            <Skeleton className="h-4 w-32 rounded-md" />
+          </div>
+          <Skeleton className="h-4 w-4/5 rounded-md sm:w-2/3" />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Skeleton className="h-8 w-24 rounded-lg" />
+          <Skeleton className="h-8 w-8 rounded-lg" />
+        </div>
       </div>
 
       {/* Active pipeline stages with animate-shimmer */}
@@ -85,23 +115,58 @@ export function LoadingState({
         ))}
       </div>
 
-      {/* Summary metric cards shimmer */}
+      {/* Summary metric cards skeleton */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <div
             key={i}
-            className="animate-rise stagger-fast relative overflow-hidden rounded-xl border border-hairline bg-surface-muted p-4"
+            className="animate-rise stagger-fast rounded-xl border border-hairline bg-surface-muted p-4"
             style={{ "--stagger": i } as CSSProperties}
           >
             <Skeleton className="h-3 w-24 rounded-full" />
-            <Skeleton className="mt-3 h-6 w-16 rounded-md" />
-            <span className="animate-shimmer pointer-events-none absolute inset-0" />
+            <Skeleton className="mt-3 h-6 w-20 rounded-md" />
+            <Skeleton className="mt-2 h-2.5 w-28 rounded-full" />
           </div>
         ))}
       </div>
 
+      {/* Hop timeline cards skeleton mirroring ChainTab */}
+      <div className="space-y-3 rounded-xl border border-hairline bg-surface-muted/45 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <Skeleton className="h-4 w-44 rounded-md" />
+          <Skeleton className="h-5 w-28 rounded-full" />
+        </div>
+        <div className="space-y-3">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div
+              key={i}
+              className="animate-rise stagger relative rounded-xl border border-hairline bg-surface p-4"
+              style={{ "--stagger": i } as CSSProperties}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Skeleton className="size-5 rounded-full" />
+                  <Skeleton className="h-5 w-16 rounded-full" />
+                  <Skeleton className="h-5 w-14 rounded-full" />
+                  <Skeleton className="h-5 w-28 rounded-full" />
+                </div>
+                <Skeleton className="h-5 w-16 rounded-full" />
+              </div>
+              <Skeleton className="mt-3 h-4 w-5/6 rounded-md" />
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Skeleton className="h-8 rounded-lg" />
+                <Skeleton className="h-8 rounded-lg" />
+                <Skeleton className="h-8 rounded-lg" />
+                <Skeleton className="h-8 rounded-lg" />
+              </div>
+              <Skeleton className="mt-3 h-2 w-full rounded-full" />
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* SEO Signals Audit Shimmer Panel */}
-      <div className="relative overflow-hidden rounded-xl border border-hairline bg-surface-muted/60 p-4">
+      <div className="rounded-xl border border-hairline bg-surface-muted/60 p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
             <CheckCircle2 className="size-3.5 text-brand" />
@@ -110,7 +175,7 @@ export function LoadingState({
           <Skeleton className="h-4 w-24 rounded-full" />
         </div>
         <div className="divide-y divide-hairline">
-          {SEO_AUDIT_LOADING_ROWS.map((rowLabel, i) => (
+          {SEO_AUDIT_LOADING_ROWS.map((rowLabel) => (
             <div
               key={rowLabel}
               className="flex items-center justify-between gap-4 py-2.5 first:pt-1 last:pb-1"
@@ -120,23 +185,20 @@ export function LoadingState({
             </div>
           ))}
         </div>
-        <span className="animate-shimmer pointer-events-none absolute inset-0" />
       </div>
 
-      {/* Hop cards shimmer */}
-      <div className="space-y-3">
-        {Array.from({ length: 2 }).map((_, i) => (
+      {/* Collapsed accordion section skeleton placeholders */}
+      <div className="space-y-2">
+        {ACCORDION_PREVIEW_SECTIONS.map((label) => (
           <div
-            key={i}
-            className="animate-rise stagger relative h-24 overflow-hidden rounded-xl border border-hairline bg-surface-muted p-4"
-            style={{ "--stagger": i } as CSSProperties}
+            key={label}
+            className="flex items-center justify-between gap-3 rounded-xl border border-hairline bg-surface/70 px-4 py-3"
           >
-            <div className="flex items-center justify-between gap-3">
-              <Skeleton className="h-5 w-20 rounded-full" />
-              <Skeleton className="h-4 w-16 rounded-md" />
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">{label}</p>
+              <Skeleton className="h-2.5 w-44 rounded-full" />
             </div>
-            <Skeleton className="mt-3 h-4 w-3/4 rounded-md" />
-            <span className="animate-shimmer pointer-events-none absolute inset-0" />
+            <Skeleton className="size-5 rounded-md" />
           </div>
         ))}
       </div>

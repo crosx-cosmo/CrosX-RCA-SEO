@@ -1,9 +1,15 @@
+import type { HTMLAttributes } from "react";
+
 import { cn } from "@/lib/utils";
 
-function Skeleton({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+function Skeleton({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("animate-shimmer relative overflow-hidden rounded-md bg-primary/10", className)}
+      aria-hidden="true"
+      className={cn(
+        "animate-shimmer relative overflow-hidden rounded-md bg-foreground/[0.075] dark:bg-foreground/[0.095]",
+        className,
+      )}
       {...props}
     />
   );

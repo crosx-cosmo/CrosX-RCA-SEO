@@ -53,12 +53,18 @@ function clean(value: string): string {
 function decodeEntities(value: string): string {
   return value
     .replace(/&amp;/gi, "&")
-    .replace(/&#x2F;/gi, "/")
-    .replace(/&#47;/g, "/")
-    .replace(/&#38;/g, "&")
+    .replace(/&#x([0-9a-fA-F]{1,6});/g, (_, hex: string) => {
+      const code = parseInt(hex, 16);
+      return code >= 32 && code <= 0x10ffff ? String.fromCodePoint(code) : _;
+    })
+    .replace(/&#(\d{1,7});/g, (_, dec: string) => {
+      const code = parseInt(dec, 10);
+      return code >= 32 && code <= 0x10ffff ? String.fromCodePoint(code) : _;
+    })
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'");
+    .replace(/&apos;/gi, "'")
+    .replace(/&colon;/gi, ":")
+    .replace(/&sol;/gi, "/");
 }
 
 function snippet(value: string, max = 160): string {
@@ -139,12 +145,18 @@ const REDIRECT_PARAM_KEYS = new Set([
   "redirect_uri",
   "redirect_url",
   "redirecturl",
+  "redir",
   "dest",
+  "dest_url",
   "destination",
   "target",
+  "target_url",
   "to",
   "out",
+  "out_url",
   "goto",
+  "go_to",
+  "forward",
   "link",
   "r",
   "next",
@@ -153,11 +165,18 @@ const REDIRECT_PARAM_KEYS = new Set([
   "returnto",
   "return_url",
   "fallback",
+  "fallback_url",
+  "$fallback_url",
+  "$desktop_url",
+  "$canonical_url",
+  "af_web_dp",
+  "deep_link_value",
   "lp",
   "offer_url",
   "deep_link",
   "uri",
   "href",
+  "url_to",
 ]);
 
 /**
@@ -435,6 +454,29 @@ export function deobfuscateJsSource(rawJs: string): {
     );
   }
 
+  // 4b. Evaluate character/chunk array joins: ['h','t','t','p','s',':','/','/',...].join('')
+  if (/\]\s*\.join\s*\(\s*["']{0,2}\s*\)/.test(js)) {
+    js = js.replace(
+      /\[\s*((?:["'][^"'\\]{0,256}["']\s*,\s*)*["'][^"'\\]{0,256}["'])\s*\]\s*\.join\s*\(\s*["']{2}\s*\)/g,
+      (full, itemsRaw: string) => {
+        const items: string[] = [];
+        const itemRe = /(["'])([^"'\\]{0,256})\1/g;
+        let im: RegExpExecArray | null;
+        while ((im = itemRe.exec(itemsRaw))) {
+          items.push(im[2] ?? "");
+        }
+        if (items.length === 0) return full;
+        steps.push("Collapsed ['...'].join('') character/chunk array");
+        return JSON.stringify(items.join(""));
+      },
+    );
+  }
+
+  // 4c. Convert expressionless template literals `https://example.com` into regular strings
+  if (/`[^`$\\]{6,2048}`/.test(js)) {
+    js = js.replace(/`([^`$\\]{6,2048})`/g, (_, inner: string) => JSON.stringify(inner));
+  }
+
   // 5. Collapse adjacent string concatenations: "https://" + "example.com" + "/path"
   let concatPass = 0;
   const concatRe = /(["'])([^"'\\]{1,500})\1\s*\+\s*(["'])([^"'\\]{1,500})\3/g;
@@ -527,19 +569,19 @@ export function deobfuscateJsSource(rawJs: string): {
 
 const JS_PATTERNS: Array<{ re: RegExp; method: string }> = [
   {
-    re: /(?:window|document|top|self|parent)?\.?location\s*\.\s*replace\s*\(\s*(["'`])([^"'`]+)\1/i,
+    re: /(?:window|document|top|self|parent|globalThis)?\.?location\s*\.\s*replace\s*\(\s*(["'`])([^"'`]+)\1/i,
     method: "location.replace()",
   },
   {
-    re: /(?:window|document|top|self|parent)?\.?location\s*\.\s*assign\s*\(\s*(["'`])([^"'`]+)\1/i,
+    re: /(?:window|document|top|self|parent|globalThis)?\.?location\s*\.\s*assign\s*\(\s*(["'`])([^"'`]+)\1/i,
     method: "location.assign()",
   },
   {
-    re: /(?:window|document|top|self|parent)\s*\.\s*location\s*\.\s*href\s*=\s*(["'`])([^"'`]+)\1/i,
+    re: /(?:window|document|top|self|parent|globalThis)\s*\.\s*location\s*\.\s*href\s*=\s*(["'`])([^"'`]+)\1/i,
     method: "window.location.href",
   },
   {
-    re: /(?:window|document|top|self|parent)\s*\.\s*location\s*=\s*(["'`])([^"'`]+)\1/i,
+    re: /(?:window|document|top|self|parent|globalThis)\s*\.\s*location\s*=\s*(["'`])([^"'`]+)\1/i,
     method: "window.location",
   },
   { re: /\blocation\s*\.\s*href\s*=\s*(["'`])([^"'`]+)\1/i, method: "location.href" },
@@ -549,7 +591,7 @@ const JS_PATTERNS: Array<{ re: RegExp; method: string }> = [
     method: "location navigation",
   },
   {
-    re: /(?:window|document|top|self)?\.?location\s*\[\s*["'`](?:href|replace|assign)["'`]\s*\]\s*(?:=\s*(["'`])([^"'`]+)\1|\(\s*(["'`])([^"'`]+)\3\s*\))/i,
+    re: /(?:window|document|top|self|globalThis)?\.?location\s*\[\s*["'`](?:href|replace|assign)["'`]\s*\]\s*(?:=\s*(["'`])([^"'`]+)\1|\(\s*(["'`])([^"'`]+)\3\s*\))/i,
     method: "bracket-notation location[...]",
   },
   { re: /\bwindow\s*\.\s*open\s*\(\s*(["'`])(https?:\/\/[^"'`]+)\1/i, method: "window.open()" },
@@ -557,11 +599,11 @@ const JS_PATTERNS: Array<{ re: RegExp; method: string }> = [
 
 const JS_VAR_PATTERNS: Array<{ re: RegExp; method: string }> = [
   {
-    re: /(?:window|document|top|self|parent)?\.?location\s*\.\s*(?:replace|assign)\s*\(\s*([A-Za-z_$][\w$]{0,60})\s*\)/i,
+    re: /(?:window|document|top|self|parent|globalThis)?\.?location\s*\.\s*(?:replace|assign)\s*\(\s*([A-Za-z_$][\w$]{0,60})\s*\)/i,
     method: "location.replace(variable)",
   },
   {
-    re: /(?:(?:window|document|top|self|parent)\s*\.\s*)?location(?:\s*\.\s*href)?\s*=\s*([A-Za-z_$][\w$]{0,60})\s*(?:[;,\n)}]|$)/i,
+    re: /(?:(?:window|document|top|self|parent|globalThis)\s*\.\s*)?location(?:\s*\.\s*href)?\s*=\s*([A-Za-z_$][\w$]{0,60})\s*(?:[;,\n)}]|$)/i,
     method: "location.href = variable",
   },
 ];
@@ -599,7 +641,8 @@ function detectAutoSubmitFormRedirect(
   baseUrl?: string,
 ): ClientRedirectSignal | null {
   const hasAutoSubmit =
-    /\.submit\s*\(\s*\)/i.test(jsBlob) || /onload\s*=\s*["'][^"']*\.submit\s*\(/i.test(html);
+    /\.(?:submit|requestSubmit)\s*\(\s*\)/i.test(jsBlob) ||
+    /onload\s*=\s*["'][^"']*\.(?:submit|requestSubmit)\s*\(/i.test(html);
   if (!hasAutoSubmit) return null;
 
   const formMatch = html.match(/<form\b([^>]*)>([\s\S]{0,20000}?)<\/form>/i);
@@ -710,6 +753,22 @@ function detectHydrationOrInterstitialRedirect(html: string): ClientRedirectSign
     };
   }
 
+  // 2b. <meta name="redirect" content="..."> or AppLinks <meta property="al:web:url" content="...">
+  const customMetaRedirect =
+    matchMetaContent(html, "name", "redirect") ??
+    matchMetaContent(html, "property", "al:web:url") ??
+    matchMetaContent(html, "property", "al:web:fallback");
+  if (customMetaRedirect && isPlausibleHttpUrl(customMetaRedirect)) {
+    return {
+      kind: "meta-refresh",
+      method: "HTML meta redirect / AppLinks target",
+      evidence: customMetaRedirect,
+      rawTarget: customMetaRedirect,
+      delaySeconds: 0,
+      deobfuscationSteps: ["Extracted URL from <meta name='redirect'> / AppLinks fallback tag"],
+    };
+  }
+
   // 3. Thin interstitial / link-locker page with an explicit "skip / continue / redirect" link
   if (looksLikeRedirector(html)) {
     const anchorRe = /<a\b([^>]+)>([\s\S]{0,300}?)<\/a>/gi;
@@ -736,6 +795,23 @@ function detectHydrationOrInterstitialRedirect(html: string): ClientRedirectSign
           deobfuscationSteps: ["Extracted destination from interstitial continue/redirect anchor"],
         };
       }
+    }
+
+    // 4. Cloaked full-page / wrapper <iframe> on thin interstitial pages (e.g. affiliate/frame cloaking)
+    const iframeMatch = html.match(/<iframe\b[^>]*\bsrc\s*=\s*["'](https?:\/\/[^"']+)["'][^>]*>/i);
+    if (
+      iframeMatch?.[1] &&
+      isPlausibleHttpUrl(iframeMatch[1]) &&
+      !/googletagmanager\.com|doubleclick\.net|facebook\.com\/tr/i.test(iframeMatch[1])
+    ) {
+      return {
+        kind: "javascript-redirect",
+        method: "cloaked full-page <iframe> frame forwarder",
+        evidence: snippet(iframeMatch[0]),
+        rawTarget: decodeEntities(iframeMatch[1]),
+        delaySeconds: null,
+        deobfuscationSteps: ["Unwrapped cloaked <iframe> destination on thin redirector page"],
+      };
     }
   }
 
@@ -859,7 +935,7 @@ export function detectClientRedirect(
           evidence: snippet(match![0]),
           rawTarget: cleanedTarget,
           delaySeconds: timerDelay,
-          deobfuscationSteps: allSteps.length > 0 ? allSteps : undefined,
+          ...(allSteps.length > 0 ? { deobfuscationSteps: allSteps } : {}),
         },
         hint: null,
         hiddenArtifacts,
@@ -914,7 +990,7 @@ export function detectClientRedirect(
 
   // 5. Isolated Mock-DOM VM Sandbox (unpacks Dean Edwards Packer eval(function(p,a,c,k,e,d)...),
   // _0x array-indexed obfuscation, XOR/charCode loops, and location.search / location.hash readers)
-  const vmSignal = evaluateScriptsInSandbox(scripts, baseUrl);
+  const vmSignal = evaluateScriptsInSandbox(scripts, baseUrl, head);
   if (vmSignal) {
     return { signal: vmSignal, hint: null, hiddenArtifacts };
   }
@@ -930,20 +1006,242 @@ export function detectClientRedirect(
 }
 
 /**
+ * Patterns that indicate a script is attempting prototype-chain traversal or host-realm probing
+ * rather than performing a legitimate client-side redirect.
+ */
+const VM_ESCAPE_PROBE_RE =
+  /(?:__proto__|\bconstructor\b|getPrototypeOf|setPrototypeOf|__lookupGetter__|__lookupSetter__|__defineGetter__|__defineSetter__|\bprocess\b|\brequire\b|\bimport\s*\(|\bReflect\b)/;
+
+/**
+ * Self-contained Mock-DOM bootstrap evaluated INSIDE the isolated Node `vm` realm so
+ * every object, function, and proxy inherits strictly from the VM's own intrinsics
+ * and zero host functions/objects are ever reachable via prototype chains.
+ */
+const VM_REALM_BOOTSTRAP = `
+(function(initJson) {
+  const init = JSON.parse(initJson);
+  const base = init.base;
+  const state = { url: null, method: "computed JavaScript navigation", delay: null, written: "" };
+
+  function recordTarget(val, method) {
+    if (state.url) return;
+    if (typeof val !== "string") return;
+    const trimmed = val.trim();
+    if (!trimmed || /^javascript:/i.test(trimmed)) return;
+    if (trimmed !== base.href) {
+      state.url = trimmed;
+      state.method = method;
+    }
+  }
+
+  function pureAtob(str) {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const s = String(str).replace(/[\\t\\n\\f\\r =]+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+    let output = "";
+    let bc = 0, bs = 0, buffer, idx = 0;
+    while ((buffer = s.charAt(idx++))) {
+      buffer = chars.indexOf(buffer);
+      if (~buffer) {
+        bs = bc % 4 ? bs * 64 + buffer : buffer;
+        if (bc++ % 4) output += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6)));
+      }
+    }
+    return output;
+  }
+
+  function pureBtoa(str) {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+    const s = String(str);
+    let output = "";
+    for (let block = 0, charCode, idx = 0, map = chars;
+      s.charAt(idx | 0) || ((map = "="), idx % 1);
+      output += map.charAt(63 & (block >> (8 - (idx % 1) * 8)))
+    ) {
+      charCode = s.charCodeAt((idx += 3 / 4));
+      block = (block << 8) | charCode;
+    }
+    return output;
+  }
+
+  function SimpleSearchParams(searchStr) {
+    const map = Object.create(null);
+    const clean = String(searchStr || "").replace(/^\\?/, "");
+    if (clean) {
+      for (const pair of clean.split("&")) {
+        if (!pair) continue;
+        const eq = pair.indexOf("=");
+        const k = eq === -1 ? decodeURIComponent(pair) : decodeURIComponent(pair.slice(0, eq));
+        const v = eq === -1 ? "" : decodeURIComponent(pair.slice(eq + 1));
+        if (!(k in map)) map[k] = v;
+      }
+    }
+    this.get = function(k) { return k in map ? map[k] : null; };
+    this.has = function(k) { return k in map; };
+  }
+
+  function SimpleURL(input, baseInput) {
+    const raw = String(input || "");
+    this.href = raw;
+    this.search = raw.includes("?") ? "?" + raw.split("?")[1].split("#")[0] : base.search;
+    this.hash = raw.includes("#") ? "#" + raw.split("#")[1] : "";
+    this.searchParams = new SimpleSearchParams(this.search);
+    this.toString = function() { return this.href; };
+  }
+
+  const locState = {
+    _href: base.href,
+    protocol: base.protocol,
+    host: base.host,
+    hostname: base.hostname,
+    port: base.port,
+    pathname: base.pathname,
+    search: base.search,
+    hash: base.hash,
+    origin: base.origin,
+    get href() { return this._href; },
+    set href(v) {
+      this._href = String(v);
+      recordTarget(this._href, "computed location.href");
+    },
+    replace: function(v) { recordTarget(String(v), "computed location.replace()"); },
+    assign: function(v) { recordTarget(String(v), "computed location.assign()"); },
+    reload: function() {},
+    toString: function() { return this._href; }
+  };
+
+  function makeElem(initialHref, initialAction) {
+    const el = {
+      href: initialHref || "",
+      src: "",
+      action: initialAction || "",
+      value: "",
+      innerHTML: "",
+      textContent: "",
+      style: {},
+      setAttribute: function(k, v) {
+        if (k === "href") el.href = String(v);
+        if (k === "action") el.action = String(v);
+        if (k === "href" || k === "action") recordTarget(String(v), 'element.setAttribute("' + k + '")');
+      },
+      getAttribute: function(k) {
+        return k === "href" ? (el.href || null) : k === "action" ? (el.action || null) : null;
+      },
+      click: function() {
+        if (typeof el.href === "string" && el.href) recordTarget(el.href, "computed element.click()");
+        else if (typeof el.action === "string" && el.action) recordTarget(el.action, "computed form.click()");
+      },
+      submit: function() {
+        if (typeof el.action === "string" && el.action) recordTarget(el.action, "computed form.submit()");
+      },
+      requestSubmit: function() {
+        if (typeof el.action === "string" && el.action) recordTarget(el.action, "computed form.requestSubmit()");
+      },
+      appendChild: function() {},
+      addEventListener: function() {}
+    };
+    return el;
+  }
+
+  const byId = Object.create(null);
+  for (const k of Object.keys(init.byId)) {
+    byId[k] = makeElem(init.byId[k].href, init.byId[k].action);
+  }
+  const forms = init.forms.map(function(f) { return makeElem(f.href, f.action); });
+
+  let timerCalls = 0;
+  function immediateTimer(fn, delay) {
+    if (timerCalls >= 4) return 1;
+    timerCalls++;
+    if (typeof delay === "number" && delay > 0) {
+      state.delay = Math.round((delay / 1000) * 10) / 10;
+    }
+    try {
+      if (typeof fn === "function") fn();
+    } catch (e) {}
+    return timerCalls;
+  }
+
+  const docObj = {
+    get location() { return locState; },
+    set location(v) { recordTarget(String(v), "computed document.location"); },
+    URL: base.href,
+    domain: base.hostname,
+    referrer: "",
+    cookie: "",
+    body: makeElem("", ""),
+    head: makeElem("", ""),
+    forms: forms,
+    getElementById: function(id) {
+      const key = String(id || "").trim();
+      return byId[key] || makeElem("", "");
+    },
+    querySelector: function(sel) {
+      const s = String(sel || "").trim();
+      if (s.charAt(0) === "#" && byId[s.slice(1)]) return byId[s.slice(1)];
+      return makeElem("", "");
+    },
+    querySelectorAll: function() { return []; },
+    getElementsByTagName: function() { return []; },
+    getElementsByClassName: function() { return []; },
+    createElement: function() { return makeElem("", ""); },
+    addEventListener: function(ev, cb) {
+      if ((ev === "DOMContentLoaded" || ev === "load") && typeof cb === "function" && timerCalls < 4) {
+        timerCalls++;
+        try { cb(); } catch (e) {}
+      }
+    },
+    write: function(str) { if (typeof str === "string") state.written += str; },
+    writeln: function(str) { if (typeof str === "string") state.written += str + "\\n"; }
+  };
+
+  const g = globalThis;
+  Object.defineProperty(g, "location", {
+    get: function() { return locState; },
+    set: function(v) { recordTarget(String(v), "computed window.location"); },
+    configurable: true
+  });
+  g.document = docObj;
+  g.navigator = {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    language: "en-US",
+    webdriver: false
+  };
+  g.history = {
+    pushState: function(_s, _t, u) { if (typeof u === "string") recordTarget(u, "history.pushState()"); },
+    replaceState: function(_s, _t, u) { if (typeof u === "string") recordTarget(u, "history.replaceState()"); }
+  };
+  g.setTimeout = immediateTimer;
+  g.setInterval = immediateTimer;
+  g.clearTimeout = function() {};
+  g.clearInterval = function() {};
+  g.requestAnimationFrame = immediateTimer;
+  g.open = function(u) { if (typeof u === "string") recordTarget(u, "computed window.open()"); return null; };
+  g.atob = pureAtob;
+  g.btoa = pureBtoa;
+  g.URL = SimpleURL;
+  g.URLSearchParams = SimpleSearchParams;
+  g.console = { log: function(){}, warn: function(){}, error: function(){} };
+  g.window = g;
+  g.self = g;
+  g.top = g;
+  g.parent = g;
+  g.__readSandboxState = function() { return JSON.stringify(state); };
+})
+`;
+
+/**
  * Executes inline <script> blocks inside a strictly time-boxed (45ms), zero-privilege
- * Node `vm` Mock-DOM context with NO network/filesystem/process access.
- * Captures any assignment or call to `window.location`, `document.location`,
- * `location.replace()`, `location.assign()`, `window.open()`, or `document.write()`
- * including inside accelerated `setTimeout` callbacks and `eval()` packers.
+ * Node `vm` Mock-DOM context with NO network/filesystem/process access and zero host
+ * object references.
  */
 function evaluateScriptsInSandbox(
   scriptTags: string[],
   baseUrl?: string,
+  htmlSnapshot = "",
 ): ClientRedirectSignal | null {
   if (scriptTags.length === 0) return null;
   let vmModule: typeof import("node:vm") | null = null;
   try {
-    // Synchronous builtin lookup in Node.js 22+
     const proc = globalThis as unknown as {
       process?: { getBuiltinModule?: (id: string) => typeof import("node:vm") };
     };
@@ -960,15 +1258,51 @@ function evaluateScriptsInSandbox(
     parsedBase = new URL("https://example.com/");
   }
 
+  // Index static elements from HTML by id and collect all <form> elements for document.forms[0]
+  const byId: Record<string, { href: string; action: string }> = {};
+  const forms: Array<{ href: string; action: string }> = [];
+  const idAttrRe = /<(a|form|iframe|button)\b([^>]*)>/gi;
+  let idm: RegExpExecArray | null;
+  while ((idm = idAttrRe.exec(htmlSnapshot)) && Object.keys(byId).length + forms.length < 60) {
+    const tagName = (idm[1] ?? "").toLowerCase();
+    const tagAttrs = idm[2] ?? "";
+    const idVal = tagAttrs.match(/\bid\s*=\s*["']([^"']+)["']/i)?.[1];
+    const hrefVal = decodeEntities(tagAttrs.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1] ?? "");
+    const actVal = decodeEntities(tagAttrs.match(/\baction\s*=\s*["']([^"']+)["']/i)?.[1] ?? "");
+    if (tagName === "form" && actVal) {
+      forms.push({ href: hrefVal, action: actVal });
+    }
+    if (idVal) {
+      byId[idVal] = { href: hrefVal, action: actVal };
+    }
+  }
+
+  const initPayload = JSON.stringify({
+    base: {
+      href: parsedBase.href,
+      protocol: parsedBase.protocol,
+      host: parsedBase.host,
+      hostname: parsedBase.hostname,
+      port: parsedBase.port,
+      pathname: parsedBase.pathname,
+      search: parsedBase.search,
+      hash: parsedBase.hash,
+      origin: parsedBase.origin,
+    },
+    byId,
+    forms,
+  });
+
   for (const tag of scriptTags.slice(0, 10)) {
     const code = tag
       .replace(/^<script[^>]*>/i, "")
       .replace(/<\/script>$/i, "")
       .trim();
     if (!code || code.length > 120_000) continue;
-    // Only run sandbox on scripts that reference navigation/encoding/eval cues
+    if (VM_ESCAPE_PROBE_RE.test(code)) continue;
+    // Only run sandbox on scripts that reference navigation/encoding/eval/DOM-click cues
     if (
-      !/location|href|replace|assign|open|eval|atob|fromCharCode|decodeURIComponent|unescape|searchParams|hash|_0x|write/i.test(
+      !/location|href|replace|assign|open|eval|atob|fromCharCode|decodeURIComponent|unescape|searchParams|hash|_0x|write|getElementById|querySelector|click|submit|forms/i.test(
         code,
       )
     ) {
@@ -980,204 +1314,29 @@ function evaluateScriptsInSandbox(
     let capturedDelay: number | null = null;
     let writtenHtml = "";
 
-    const recordTarget = (val: unknown, method: string) => {
-      if (capturedUrl) return;
-      if (typeof val !== "string") return;
-      const trimmed = val.trim();
-      if (!trimmed || /^javascript:/i.test(trimmed)) return;
-      if (trimmed !== parsedBase.href) {
-        capturedUrl = trimmed;
-        capturedMethod = method;
-      }
-    };
-
-    const locState = {
-      _href: parsedBase.href,
-      protocol: parsedBase.protocol,
-      host: parsedBase.host,
-      hostname: parsedBase.hostname,
-      port: parsedBase.port,
-      pathname: parsedBase.pathname,
-      search: parsedBase.search,
-      hash: parsedBase.hash,
-      origin: parsedBase.origin,
-      get href() {
-        return this._href;
-      },
-      set href(v: string) {
-        this._href = String(v);
-        recordTarget(this._href, "computed location.href");
-      },
-      replace(v: string) {
-        recordTarget(String(v), "computed location.replace()");
-      },
-      assign(v: string) {
-        recordTarget(String(v), "computed location.assign()");
-      },
-      reload() {},
-      toString() {
-        return this._href;
-      },
-    };
-
-    const locationProxy = new Proxy(locState, {
-      set(target, prop, value) {
-        if (prop === "href") {
-          target.href = String(value);
-          return true;
-        }
-        (target as Record<string, unknown>)[String(prop)] = value;
-        return true;
-      },
-    });
-
-    const dummyElement = (): Record<string, unknown> => ({
-      href: "",
-      src: "",
-      action: "",
-      value: "",
-      innerHTML: "",
-      textContent: "",
-      style: {},
-      setAttribute(k: string, v: string) {
-        if (k === "href" || k === "action") recordTarget(v, `element.setAttribute("${k}")`);
-      },
-      getAttribute() {
-        return null;
-      },
-      click() {},
-      submit() {},
-      appendChild() {},
-      addEventListener() {},
-    });
-
-    let timerCalls = 0;
-    const immediateTimer = (fn: unknown, delay?: unknown) => {
-      if (timerCalls >= 4) return 1;
-      timerCalls++;
-      if (typeof delay === "number" && delay > 0) {
-        capturedDelay = Math.round((delay / 1000) * 10) / 10;
-      }
-      try {
-        if (typeof fn === "function") fn();
-      } catch {
-        // ignore inner errors
-      }
-      return timerCalls;
-    };
-
-    const docObj: Record<string, unknown> = {
-      get location() {
-        return locationProxy;
-      },
-      set location(v: unknown) {
-        recordTarget(String(v), "computed document.location");
-      },
-      URL: parsedBase.href,
-      domain: parsedBase.hostname,
-      referrer: "",
-      cookie: "",
-      body: dummyElement(),
-      head: dummyElement(),
-      forms: [],
-      getElementById: () => dummyElement(),
-      querySelector: () => dummyElement(),
-      querySelectorAll: () => [],
-      getElementsByTagName: () => [],
-      getElementsByClassName: () => [],
-      createElement: () => dummyElement(),
-      addEventListener: (ev: string, cb: unknown) => {
-        if (
-          (ev === "DOMContentLoaded" || ev === "load") &&
-          typeof cb === "function" &&
-          timerCalls < 4
-        ) {
-          timerCalls++;
-          try {
-            cb();
-          } catch {
-            // ignore
-          }
-        }
-      },
-      write: (str: unknown) => {
-        if (typeof str === "string") writtenHtml += str;
-      },
-      writeln: (str: unknown) => {
-        if (typeof str === "string") writtenHtml += `${str}\n`;
-      },
-    };
-
-    const sandbox: Record<string, unknown> = {
-      location: locationProxy,
-      document: docObj,
-      navigator: {
-        userAgent:
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        language: "en-US",
-        webdriver: false,
-      },
-      history: {
-        pushState: (_s: unknown, _t: unknown, u?: unknown) => {
-          if (typeof u === "string") recordTarget(u, "history.pushState()");
-        },
-        replaceState: (_s: unknown, _t: unknown, u?: unknown) => {
-          if (typeof u === "string") recordTarget(u, "history.replaceState()");
-        },
-      },
-      setTimeout: immediateTimer,
-      setInterval: immediateTimer,
-      clearTimeout: () => {},
-      clearInterval: () => {},
-      requestAnimationFrame: immediateTimer,
-      open: (u: unknown) => {
-        if (typeof u === "string") recordTarget(u, "computed window.open()");
-        return null;
-      },
-      atob: (s: string) => atob(String(s)),
-      btoa: (s: string) => btoa(String(s)),
-      URL,
-      URLSearchParams,
-      decodeURIComponent,
-      encodeURIComponent,
-      unescape,
-      escape,
-      console: { log() {}, warn() {}, error() {} },
-    };
-
-    // Wire window / self / top / parent getters & setters so `window.location = "..."` triggers recordTarget
-    const winProxy = new Proxy(sandbox, {
-      get(target, prop) {
-        if (
-          prop === "window" ||
-          prop === "self" ||
-          prop === "top" ||
-          prop === "parent" ||
-          prop === "globalThis"
-        ) {
-          return winProxy;
-        }
-        return target[String(prop)];
-      },
-      set(target, prop, value) {
-        if (prop === "location") {
-          recordTarget(String(value), "computed window.location");
-          return true;
-        }
-        target[String(prop)] = value;
-        return true;
-      },
-    });
-    sandbox.window = winProxy;
-    sandbox.self = winProxy;
-    sandbox.top = winProxy;
-    sandbox.parent = winProxy;
-
     try {
-      const ctx = vmModule.createContext(sandbox, {
+      // Null-prototype context with zero host object references
+      const ctx = vmModule.createContext(Object.create(null), {
         codeGeneration: { strings: true, wasm: false },
       });
+      const bootstrapFn = vmModule.runInContext(VM_REALM_BOOTSTRAP, ctx, { timeout: 25 }) as (
+        json: string,
+      ) => void;
+      bootstrapFn(initPayload);
       vmModule.runInContext(code, ctx, { timeout: 45 });
+      const rawOut = vmModule.runInContext("__readSandboxState()", ctx, { timeout: 15 });
+      if (typeof rawOut === "string") {
+        const parsedOut = JSON.parse(rawOut) as {
+          url: string | null;
+          method: string;
+          delay: number | null;
+          written: string;
+        };
+        capturedUrl = parsedOut.url;
+        capturedMethod = parsedOut.method;
+        capturedDelay = parsedOut.delay;
+        writtenHtml = parsedOut.written;
+      }
     } catch {
       // ignore script runtime or timeout errors
     }
@@ -1286,4 +1445,137 @@ export function looksLikeRedirector(html: string): boolean {
     .replace(/\s+/g, " ")
     .trim();
   return text.length < 1200;
+}
+
+const JSON_REDIRECT_KEYS = new Set([
+  "url",
+  "redirect",
+  "redirecturl",
+  "redirect_url",
+  "target",
+  "targeturl",
+  "target_url",
+  "location",
+  "destination",
+  "dest",
+  "next",
+  "nexturl",
+  "next_url",
+  "link",
+  "href",
+  "goto",
+  "forward",
+  "fallbackurl",
+  "fallback_url",
+]);
+
+/**
+ * Extracts a redirect destination URL from an API / AJAX JSON payload, including
+ * nested `{ data: { url: "..." } }` or `{ result: { redirectUrl: "..." } }` structures.
+ */
+export function extractJsonRedirectTarget(
+  jsonText: string,
+): { url: string; keyPath: string } | null {
+  const trimmed = jsonText.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  const visit = (
+    node: unknown,
+    path: string,
+    depth: number,
+  ): { url: string; keyPath: string } | null => {
+    if (depth > 4 || !node || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (let idx = 0; idx < Math.min(node.length, 5); idx++) {
+        const hit = visit(node[idx], `${path}[${idx}]`, depth + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    const entries = Object.entries(node as Record<string, unknown>);
+    // Prefer matching redirect keys directly at current depth
+    for (const [k, v] of entries) {
+      if (typeof v === "string" && JSON_REDIRECT_KEYS.has(k.toLowerCase())) {
+        const val = v.trim();
+        if (isPlausibleHttpUrl(val) || val.startsWith("/")) {
+          return { url: val, keyPath: path ? `${path}.${k}` : k };
+        }
+      }
+    }
+    // Recurse into sub-objects (e.g. data, result, payload)
+    for (const [k, v] of entries) {
+      if (v && typeof v === "object") {
+        const hit = visit(v, path ? `${path}.${k}` : k, depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+
+  return visit(parsed, "", 0);
+}
+
+/**
+ * Extracts a concise, human-readable upstream block/error reason from a JSON or
+ * HTML 4xx/5xx body (e.g. `{"status":"failed","message":"Access not allowed through a VPN or proxy"}`).
+ */
+export function extractUpstreamBlockReason(bodyText: string): string | null {
+  const trimmed = bodyText.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      for (const key of ["message", "error", "reason", "detail", "error_description", "msg"]) {
+        const val = obj[key];
+        if (typeof val === "string" && val.trim().length > 2) {
+          return val.trim().slice(0, 220);
+        }
+        if (
+          val &&
+          typeof val === "object" &&
+          typeof (val as Record<string, unknown>)["message"] === "string"
+        ) {
+          return String((val as Record<string, unknown>)["message"])
+            .trim()
+            .slice(0, 220);
+        }
+      }
+    } catch {
+      // fall through to text check
+    }
+  }
+
+  // Thin HTML error page
+  const cleaned = trimmed
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length >= 6 && cleaned.length <= 260) {
+    return cleaned.slice(0, 220);
+  }
+  const titleMatch = trimmed.match(/<title[^>]*>([^<]{3,160})<\/title>/i)?.[1]?.trim();
+  if (titleMatch && !/just a moment|cloudflare/i.test(titleMatch)) {
+    return decodeEntities(titleMatch).slice(0, 180);
+  }
+  return null;
+}
+
+/**
+ * Returns true if an upstream rejection message indicates OS / device / browser
+ * gating so the trace engine can automatically adapt its User-Agent & Client Hints.
+ */
+export function isOsOrDeviceRejectionMessage(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  return /(?:operating system|mobile only|desktop only|android only|ios only|device not allowed|device not supported|unsupported device|platform not allowed|browser not supported|wrong device|mobile traffic only)/i.test(
+    reason,
+  );
 }

@@ -30,7 +30,10 @@ import {
 import {
   detectClientRedirect,
   extractEmbeddedTargets,
+  extractJsonRedirectTarget,
   extractPageMeta,
+  extractUpstreamBlockReason,
+  isOsOrDeviceRejectionMessage,
   looksLikeRedirector,
   parseRefreshValue,
 } from "./trace-detect";
@@ -46,11 +49,11 @@ import type {
 } from "./redirect-types";
 
 export const MAX_HOPS = 20;
-export const PER_HOP_TIMEOUT_MS = 15_000;
-export const OVERALL_TIMEOUT_MS = 55_000;
+const PER_HOP_TIMEOUT_MS = 15_000;
+const OVERALL_TIMEOUT_MS = 55_000;
 const MAX_BODY_BYTES = 2_000_000;
 
-export const MECHANISM_LABEL: Record<HopMechanism, string> = {
+const MECHANISM_LABEL: Record<HopMechanism, string> = {
   "http-redirect": "HTTP Redirect",
   "javascript-redirect": "JavaScript Redirect",
   "meta-refresh": "Meta Refresh",
@@ -221,7 +224,7 @@ function isLikelyGatewayOrWrapperUrl(rawUrl: string): boolean {
       return true;
     }
     if (
-      /^\/(?:l\.php|url|redirect|out|go|r|exit|leave|click|track|away|external|jump| visit|link|v3\/__)/i.test(
+      /^\/(?:l\.php|url|redirect|out|go|r|exit|leave|click|track|away|external|jump|visit|link|v3\/__)/i.test(
         path,
       )
     ) {
@@ -231,6 +234,67 @@ function isLikelyGatewayOrWrapperUrl(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+const OS_FALLBACK_ORDER: UserAgentPreset[] = ["mobile-android", "mobile-iphone", "desktop-chrome"];
+
+function isSpecialBotPreset(preset: UserAgentPreset): boolean {
+  return (
+    preset === "googlebot-smartphone" || preset === "googlebot-desktop" || preset === "social-bot"
+  );
+}
+
+export function buildHopRequestHeaders(
+  presetKey: UserAgentPreset,
+  cookieHeader: string | null,
+  refererSent: string | null,
+): Record<string, string> {
+  const preset = USER_AGENT_PRESETS[presetKey] ?? USER_AGENT_PRESETS["desktop-chrome"];
+  const headers: Record<string, string> = {
+    "user-agent": preset.ua,
+    accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,image/avif,image/webp,*/*;q=0.7",
+    "accept-language": "en-US,en;q=0.9",
+    "upgrade-insecure-requests": "1",
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": refererSent ? "cross-site" : "none",
+    "sec-fetch-user": "?1",
+  };
+  if (preset.secChUa) headers["sec-ch-ua"] = preset.secChUa;
+  if (preset.secChUaMobile) headers["sec-ch-ua-mobile"] = preset.secChUaMobile;
+  if (preset.secChUaPlatform) headers["sec-ch-ua-platform"] = preset.secChUaPlatform;
+  if (cookieHeader) headers["cookie"] = cookieHeader;
+  if (refererSent) headers["referer"] = refererSent;
+  return headers;
+}
+
+function isReadableBodyType(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return (
+    ct === "" ||
+    ct.includes("html") ||
+    ct.includes("xhtml") ||
+    ct.includes("json") ||
+    ct.includes("javascript") ||
+    ct.includes("ecmascript") ||
+    ct.includes("text/plain") ||
+    ct.includes("xml")
+  );
+}
+
+async function readResponseTextSafe(res: Response): Promise<string> {
+  const contentType = res.headers.get("content-type") ?? "";
+  const contentLength = Number(res.headers.get("content-length") ?? "0");
+  if (isReadableBodyType(contentType) && contentLength <= MAX_BODY_BYTES) {
+    try {
+      return await readBoundedText(res, 500_000);
+    } catch {
+      return "";
+    }
+  }
+  await res.body?.cancel().catch(() => {});
+  return "";
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -314,7 +378,7 @@ function makeHop(
     nextUrl: partial.nextUrl ?? null,
     blockedReason: partial.blockedReason ?? null,
     addresses: partial.addresses ?? [],
-    forensics: partial.forensics,
+    ...(partial.forensics !== undefined ? { forensics: partial.forensics } : {}),
   };
 }
 
@@ -322,7 +386,8 @@ export async function traceUrl(
   rawUrl: string,
   userAgentPreset: UserAgentPreset = "desktop-chrome",
 ): Promise<RedirectAnalysis> {
-  const preset = USER_AGENT_PRESETS[userAgentPreset] ?? USER_AGENT_PRESETS["desktop-chrome"];
+  let activePresetKey: UserAgentPreset = userAgentPreset;
+  let activePreset = USER_AGENT_PRESETS[activePresetKey] ?? USER_AGENT_PRESETS["desktop-chrome"];
   const startUrl = normalizeUrl(rawUrl);
   const deadline = Date.now() + OVERALL_TIMEOUT_MS;
   const hops: HopDraft[] = [];
@@ -359,8 +424,8 @@ export async function traceUrl(
       finalDestinationConfirmed: false,
       browserFallbackUsed,
       browserFallbackNote,
-      userAgentPreset,
-      userAgentLabel: preset.label,
+      userAgentPreset: activePresetKey,
+      userAgentLabel: activePreset.label,
     });
   }
 
@@ -397,7 +462,7 @@ export async function traceUrl(
           blockedReason: verdict.reason,
           mechanismDetail: verdict.reason,
           redirectType: "Blocked destination",
-          forensics: embeddedTargets.length > 0 ? { embeddedTargets } : undefined,
+          ...(embeddedTargets.length > 0 ? { forensics: { embeddedTargets } } : {}),
         }),
       );
       terminationReason = "blocked";
@@ -410,20 +475,7 @@ export async function traceUrl(
     const started = Date.now();
     const { headerValue: cookieHeader, names: cookiesSent } = cookieJar.getCookiesFor(current);
     const refererSent = pendingReferer;
-
-    const reqHeaders: Record<string, string> = {
-      "user-agent": preset.ua,
-      accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "accept-language": "en-US,en;q=0.9",
-      "upgrade-insecure-requests": "1",
-      "sec-fetch-dest": "document",
-      "sec-fetch-mode": "navigate",
-      "sec-fetch-site": refererSent ? "cross-site" : "none",
-      "sec-fetch-user": "?1",
-    };
-    if (cookieHeader) reqHeaders["cookie"] = cookieHeader;
-    if (refererSent) reqHeaders["referer"] = refererSent;
+    const reqHeaders = buildHopRequestHeaders(activePresetKey, cookieHeader, refererSent);
 
     let response: Response;
     try {
@@ -462,7 +514,7 @@ export async function traceUrl(
               addresses: verdict.addresses,
               forensics: {
                 embeddedTargets,
-                cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+                ...(cookiesSent.length > 0 ? { cookiesSent } : {}),
                 refererSent,
                 deobfuscationSteps: [
                   `Gateway request failed (${message})`,
@@ -488,8 +540,8 @@ export async function traceUrl(
           redirectType: "Request failed",
           addresses: verdict.addresses,
           forensics: {
-            embeddedTargets: embeddedTargets.length > 0 ? embeddedTargets : undefined,
-            cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+            ...(embeddedTargets.length > 0 ? { embeddedTargets } : {}),
+            ...(cookiesSent.length > 0 ? { cookiesSent } : {}),
             refererSent,
           },
         }),
@@ -501,17 +553,126 @@ export async function traceUrl(
       break;
     }
 
+    let rawSetCookies = extractRawSetCookies(response.headers);
+    let cookiesSet = cookieJar.ingestSetCookieHeaders(rawSetCookies, current);
+    let headers = headersToObject(response.headers);
+    let referrerPolicyHeader = response.headers.get("referrer-policy");
+
+    const adaptationNotes: string[] = [];
+
+    // --- Adaptive OS / Device Retry: if a regular browser profile hits HTTP 400/403/406/412/415
+    // (common for mobile-only CPA/affiliate offers or OS-gated shortlinks), automatically probe
+    // Android Chrome / iPhone Safari / Desktop Chrome while honoring SSRF + timeout budgets.
+    let preReadBody: string | null = null;
+    if (
+      !isSpecialBotPreset(activePresetKey) &&
+      (response.status === 400 ||
+        response.status === 403 ||
+        response.status === 406 ||
+        response.status === 412 ||
+        response.status === 415) &&
+      !response.headers.get("location") &&
+      !response.headers.get("hx-redirect") &&
+      !response.headers.get("x-redirect") &&
+      !response.headers.get("x-redirect-to") &&
+      !response.headers.get("refresh") &&
+      deadline - Date.now() > 4500
+    ) {
+      preReadBody = await readResponseTextSafe(response);
+      const initialRejectReason = extractUpstreamBlockReason(preReadBody);
+      const shouldProbeAltOs =
+        isOsOrDeviceRejectionMessage(initialRejectReason) ||
+        response.status === 403 ||
+        response.status === 406;
+
+      if (shouldProbeAltOs) {
+        const candidates = OS_FALLBACK_ORDER.filter((p) => p !== activePresetKey);
+        for (const candidatePreset of candidates) {
+          if (deadline - Date.now() <= 2500) break;
+          const retryHeaders = buildHopRequestHeaders(
+            candidatePreset,
+            cookieJar.getCookiesFor(current).headerValue,
+            refererSent,
+          );
+          try {
+            const retryRes = await fetch(current, {
+              method: "GET",
+              redirect: "manual",
+              headers: retryHeaders,
+              signal: AbortSignal.timeout(Math.min(7000, deadline - Date.now())),
+            });
+            const hasRetryRedirect =
+              isRedirect(retryRes.status) ||
+              Boolean(
+                retryRes.headers.get("location") ??
+                retryRes.headers.get("hx-redirect") ??
+                retryRes.headers.get("x-redirect") ??
+                retryRes.headers.get("x-redirect-to") ??
+                retryRes.headers.get("refresh"),
+              );
+
+            if (hasRetryRedirect || (retryRes.status >= 200 && retryRes.status < 300)) {
+              const oldLabel = activePreset.label;
+              activePresetKey = candidatePreset;
+              activePreset = USER_AGENT_PRESETS[candidatePreset];
+              adaptationNotes.push(
+                `${oldLabel} received HTTP ${response.status}${initialRejectReason ? ` ("${initialRejectReason}")` : ""}; switched to ${activePreset.label} and unlocked hop`,
+              );
+              response = retryRes;
+              preReadBody = null;
+              rawSetCookies = extractRawSetCookies(response.headers);
+              cookiesSet = cookieJar.ingestSetCookieHeaders(rawSetCookies, current);
+              headers = headersToObject(response.headers);
+              referrerPolicyHeader = response.headers.get("referrer-policy");
+              break;
+            }
+
+            const retryBody = await readResponseTextSafe(retryRes);
+            const retryJsonTarget = retryBody ? extractJsonRedirectTarget(retryBody) : null;
+            if (retryJsonTarget) {
+              const oldLabel = activePreset.label;
+              activePresetKey = candidatePreset;
+              activePreset = USER_AGENT_PRESETS[candidatePreset];
+              adaptationNotes.push(
+                `${oldLabel} received HTTP ${response.status}; switched to ${activePreset.label} and extracted JSON redirect`,
+              );
+              response = retryRes;
+              preReadBody = retryBody;
+              rawSetCookies = extractRawSetCookies(response.headers);
+              cookiesSet = cookieJar.ingestSetCookieHeaders(rawSetCookies, current);
+              headers = headersToObject(response.headers);
+              referrerPolicyHeader = response.headers.get("referrer-policy");
+              break;
+            }
+
+            const retryReason = retryBody ? extractUpstreamBlockReason(retryBody) : null;
+            if (retryReason && retryReason !== initialRejectReason) {
+              adaptationNotes.push(
+                `Tested ${USER_AGENT_PRESETS[candidatePreset].label}: bypassed OS check (${initialRejectReason ?? response.status}), hit upstream gate HTTP ${retryRes.status} ("${retryReason}")`,
+              );
+              if (
+                isOsOrDeviceRejectionMessage(initialRejectReason) &&
+                !isOsOrDeviceRejectionMessage(retryReason)
+              ) {
+                response = retryRes;
+                preReadBody = retryBody;
+              }
+            }
+          } catch {
+            // Try next OS profile
+          }
+        }
+      }
+    }
+
     const responseTimeMs = Date.now() - started;
-    const rawSetCookies = extractRawSetCookies(response.headers);
-    const cookiesSet = cookieJar.ingestSetCookieHeaders(rawSetCookies, current);
-    const headers = headersToObject(response.headers);
-    const referrerPolicyHeader = response.headers.get("referrer-policy");
 
     const baseForensics: HopForensics = {
-      cookiesSet: cookiesSet.length > 0 ? cookiesSet : undefined,
-      cookiesSent: cookiesSent.length > 0 ? cookiesSent : undefined,
+      ...(adaptationNotes.length > 0 ? { deobfuscationSteps: adaptationNotes } : {}),
+      ...(cookiesSet.length > 0 ? { cookiesSet } : {}),
+      ...(cookiesSent.length > 0 ? { cookiesSent } : {}),
       refererSent,
-      embeddedTargets: embeddedTargets.length > 0 ? embeddedTargets : undefined,
+      ...(embeddedTargets.length > 0 ? { embeddedTargets } : {}),
       securityHeaders: {
         hsts: Boolean(response.headers.get("strict-transport-security")),
         csp: Boolean(response.headers.get("content-security-policy")),
@@ -615,24 +776,55 @@ export async function traceUrl(
       continue;
     }
 
-    // --- 3. Inspect the body for client-side navigation & deep forensics
-    const contentType = response.headers.get("content-type") ?? "";
-    const contentLength = Number(response.headers.get("content-length") ?? "0");
-    let html = "";
-    if (
-      (contentType.includes("html") || contentType.includes("xhtml") || contentType === "") &&
-      contentLength <= MAX_BODY_BYTES
-    ) {
-      try {
-        html = await readBoundedText(response, 500_000);
-      } catch {
-        html = "";
+    // --- 3. Inspect the body (HTML, JSON API, JS endpoint, or text) for hidden redirects & upstream errors
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    const bodyText = preReadBody !== null ? preReadBody : await readResponseTextSafe(response);
+    const html =
+      contentType.includes("javascript") || contentType.includes("ecmascript")
+        ? `<script>${bodyText}</script>`
+        : bodyText;
+
+    // 3a. JSON API redirect payloads (only follow on 2xx or explicitly non-error payloads)
+    const jsonRedirect = bodyText ? extractJsonRedirectTarget(bodyText) : null;
+    if (jsonRedirect && response.status < 400) {
+      const resolved = resolveAgainst(current, jsonRedirect.url);
+      baseForensics.deobfuscationSteps = [
+        ...(baseForensics.deobfuscationSteps ?? []),
+        `Extracted redirect URL from JSON response field "${jsonRedirect.keyPath}"`,
+      ];
+      hops.push(
+        makeHop({
+          ...base,
+          mechanism: "javascript-redirect",
+          redirectType: "JSON API Redirect",
+          location: jsonRedirect.url,
+          resolvedLocation: resolved,
+          nextUrl: resolved,
+          mechanismDetail: `${response.status} JSON response containing "${jsonRedirect.keyPath}" redirect`,
+          evidence: `"${jsonRedirect.keyPath}": "${jsonRedirect.url}"`,
+          blockedReason: resolved
+            ? null
+            : `The JSON redirect target "${jsonRedirect.url}" is not a valid URL.`,
+          forensics: baseForensics,
+        }),
+      );
+      if (!resolved) {
+        terminationReason = "dead-end";
+        terminationDetail = `JSON redirect "${jsonRedirect.url}" could not be resolved.`;
+        finalDestinationConfirmed = false;
+        break;
       }
-    } else {
-      await response.body?.cancel().catch(() => {});
+      pendingReferer = computeNextReferer(current, resolved, referrerPolicyHeader);
+      current = resolved;
+      if (i === MAX_HOPS - 1) {
+        truncated = true;
+        terminationReason = "max-hops";
+        finalDestinationConfirmed = false;
+      }
+      continue;
     }
 
-    if (html) {
+    if (html && !html.trimStart().startsWith("{")) {
       page = extractPageMeta(html, current);
     }
 
@@ -653,7 +845,10 @@ export async function traceUrl(
             ? "form-redirect"
             : "javascript-redirect";
       if (detection.signal.deobfuscationSteps?.length) {
-        baseForensics.deobfuscationSteps = detection.signal.deobfuscationSteps;
+        baseForensics.deobfuscationSteps = [
+          ...(baseForensics.deobfuscationSteps ?? []),
+          ...detection.signal.deobfuscationSteps,
+        ];
       }
       hops.push(
         makeHop({
@@ -728,12 +923,16 @@ export async function traceUrl(
       }
     }
 
+    const upstreamBlockReason =
+      response.status >= 400 && bodyText ? extractUpstreamBlockReason(bodyText) : null;
+
     const hasExternalScriptInThinPage =
       Boolean(html) &&
       looksLikeRedirector(html) &&
       /<script[^>]+src\s*=\s*["'][^"']+["']/i.test(html);
     const isBotChallengedHop =
-      response.status === 403 || response.status === 429 || response.status === 503;
+      (response.status === 403 || response.status === 429 || response.status === 503) &&
+      !upstreamBlockReason?.startsWith("Access not allowed");
 
     if (detection.hint || hasExternalScriptInThinPage || isBotChallengedHop) {
       // Dynamic navigation, external script redirector, or anti-bot interstitial:
@@ -746,7 +945,7 @@ export async function traceUrl(
       const browserBudget = Math.min(25_000, deadline - Date.now());
       const rendered =
         browserBudget > 4500
-          ? await traceWithBrowser(current, browserBudget, preset.ua)
+          ? await traceWithBrowser(current, browserBudget, activePreset.ua)
           : {
               ok: false as const,
               reason: "Not enough time left in the analysis budget to run the headless browser.",
@@ -817,22 +1016,31 @@ export async function traceUrl(
       }
     }
 
-    // --- 5. Genuine final response
+    // --- 5. Genuine final response (or hard upstream 4xx/5xx gate)
     hops.push(
       makeHop({
         ...base,
         mechanism: response.status >= 400 ? "error" : "final-response",
         redirectType: redirectTypeLabel(response.status),
+        blockedReason: response.status >= 400 ? upstreamBlockReason : null,
         mechanismDetail:
           response.status >= 400
-            ? `${response.status} ${redirectTypeLabel(response.status)} — chain ends with an error response`
-            : "No further redirect found (HTTP, meta refresh, form, gateway or JavaScript).",
+            ? upstreamBlockReason
+              ? `HTTP ${response.status} — ${upstreamBlockReason}`
+              : `${response.status} ${redirectTypeLabel(response.status)} — chain ends with an error response`
+            : "No further redirect found (HTTP, meta refresh, form, gateway, JSON or JavaScript).",
+        evidence:
+          response.status >= 400 && upstreamBlockReason && bodyText.trim().startsWith("{")
+            ? bodyText.trim().slice(0, 220)
+            : null,
         forensics: baseForensics,
       }),
     );
     if (response.status >= 400) {
       terminationReason = "error-response";
-      terminationDetail = `The chain ends on a ${response.status} response.`;
+      terminationDetail = upstreamBlockReason
+        ? `Upstream server responded with HTTP ${response.status}: "${upstreamBlockReason}".`
+        : `The chain ends on a ${response.status} response.`;
       finalDestinationConfirmed = false;
     }
     break;
@@ -850,8 +1058,8 @@ export async function traceUrl(
     finalDestinationConfirmed,
     browserFallbackUsed,
     browserFallbackNote,
-    userAgentPreset,
-    userAgentLabel: preset.label,
+    userAgentPreset: activePresetKey,
+    userAgentLabel: activePreset.label,
   });
 }
 

@@ -63,6 +63,15 @@ function isStaticAssetPath(pathname: string): boolean {
   );
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function buildSecurityRejectionResponse(
   request: Request,
   status: number,
@@ -74,7 +83,7 @@ function buildSecurityRejectionResponse(
     accept.includes("application/json") || new URL(request.url).pathname.startsWith("/api/");
   const body = isJson
     ? JSON.stringify({ error: message, status })
-    : `<!doctype html><meta charset="utf-8"><title>${status}</title><body style="font-family:system-ui;padding:3rem;text-align:center"><h1>${status}</h1><p>${message}</p><a href="/">Redirect Chain Analyzer</a></body>`;
+    : `<!doctype html><meta charset="utf-8"><title>${status}</title><body style="font-family:system-ui;padding:3rem;text-align:center"><h1>${status}</h1><p>${escapeHtml(message)}</p><a href="/">Redirect Chain Analyzer</a></body>`;
   return applySecurityHeaders(
     new Response(body, {
       status,

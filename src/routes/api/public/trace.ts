@@ -111,11 +111,12 @@ async function handle(request: Request, urls: string[], userAgent?: z.infer<type
 
   const configuredApiKey =
     typeof process !== "undefined" ? process.env["REDIRECT_TRACER_API_KEY"]?.trim() : undefined;
-  const authHeader = request.headers.get("authorization");
-  if (configuredApiKey && authHeader) {
+  if (configuredApiKey) {
+    const authHeader =
+      request.headers.get("authorization") ?? request.headers.get("x-api-key") ?? "";
     const provided = authHeader.replace(/^Bearer\s+/i, "").trim();
-    if (!constantTimeEquals(provided, configuredApiKey)) {
-      return json({ error: "Invalid API key." }, 401);
+    if (!provided || !constantTimeEquals(provided, configuredApiKey)) {
+      return json({ error: "Unauthorized: valid API key required." }, 401);
     }
   }
 
